@@ -1,22 +1,49 @@
 #include <errno.h>
 #include <fcntl.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/poll.h>
 #include <termios.h>
 #include <unistd.h>
 
+const int addr = 1;
+
+#define AUTO_FOCUS
+
+#if defined(AUTO_FOCUS)
+#define SYNC 0xc5
+#else
+#define SYNC 0xff
+#endif
+
+static void DumpHex(const void *data, size_t size);
+
 const unsigned char init[] = {0xa5, 0x7b, 0x9e, 0xf0, 0xef, 0xee, 0xe0, 0xf4};
 
-const unsigned char zoom_in[] = {0xc5, 0x01, 0x00, 0x20,
-                                 0x00, 0x00, 0x21, 0x5c};
-const unsigned char zoom_out[] = {0xc5, 0x1, 0x0, 0x40, 0x0, 0x0, 0x41, 0x5c};
-const unsigned char cancel[] = {0xc5, 0x1, 0x0, 0x0, 0x0, 0x0, 0x1, 0x5c};
+// CMD 0x20 00
+// DATA 0 0x21
+const unsigned char zoom_in[] = {0x00, 0x20, 0x00, 0x00};
+// CMD 0x40 00
+// DATA 0 0x21
+const unsigned char zoom_out[] = {0x0, 0x40, 0x0, 0x0};
+// CMD 0 00
+// DATA 0 0
+const unsigned char cancel[] = {0x0, 0x0, 0x0, 0x0};
 
 static void send_cmd(int fd, const char *name, const unsigned char *cmd) {
   puts(name);
-  write(fd, cmd, 8);
+  unsigned char bstr[] = {SYNC, addr, 0, 0, 0, 0, 0, 0x5c};
+  memcpy(bstr + 2, cmd, 4);
+  uint8_t checkSum = 0;
+  for (int i = 1; i < 6; i++) {
+    checkSum += bstr[i];
+  }
+  bstr[6] = checkSum;
+  write(fd, bstr, sizeof(bstr));
 }
+
+static void init_ptz(int fd) { write(fd, init, 8); }
 
 #define CMD(name, data)                                                        \
   send_cmd(uart, name, data);                                                  \
@@ -87,9 +114,9 @@ int main() {
   cfmakeraw(&options);
   tcsetattr(uart, TCSANOW, &options);
 
+  init_ptz(uart);
   int flags = fcntl(uart, F_GETFL, 0);
   fcntl(uart, F_SETFL, flags | O_NONBLOCK);
-  write(uart, init, 8);
 
   printf("Xingongmai Motors, get in a car and fasten your safety belt\n");
   printf("Commands: + - Enter (to cancel)\n");
