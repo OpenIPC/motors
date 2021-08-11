@@ -7,7 +7,7 @@
 #include <termios.h>
 #include <unistd.h>
 
-const int addr = 1;
+const int addressPTZ = 1;
 
 #define AUTO_FOCUS
 
@@ -17,36 +17,45 @@ const int addr = 1;
 #define SYNC 0xff
 #endif
 
-static void DumpHex(const void *data, size_t size);
+const uint8_t init[] = {0xa5, 0x7b, 0x9e, 0xf0, 0xef, 0xee, 0xe0, 0xf4};
 
-const unsigned char init[] = {0xa5, 0x7b, 0x9e, 0xf0, 0xef, 0xee, 0xe0, 0xf4};
+static void send_cmd(int fd, int panSpeed, int tiltSpeed, int zoomSpeed) {
+  uint8_t command1 = 0, command2 = 0, data1 = 0, data2 = 0, checkSum = 0;
 
-// CMD 0x20 00
-// DATA 0 0x21
-const unsigned char zoom_in[] = {0x00, 0x20, 0x00, 0x00};
-// CMD 0x40 00
-// DATA 0 0x21
-const unsigned char zoom_out[] = {0x0, 0x40, 0x0, 0x0};
-// CMD 0 00
-// DATA 0 0
-const unsigned char cancel[] = {0x0, 0x0, 0x0, 0x0};
-
-static void send_cmd(int fd, const char *name, const unsigned char *cmd) {
-  puts(name);
-  unsigned char bstr[] = {SYNC, addr, 0, 0, 0, 0, 0, 0x5c};
-  memcpy(bstr + 2, cmd, 4);
-  uint8_t checkSum = 0;
-  for (int i = 1; i < 6; i++) {
-    checkSum += bstr[i];
+  if (panSpeed < 0) {
+    command2 |= 0x04;
+    panSpeed *= (-1);
+  } else if (panSpeed > 0) {
+    command2 |= 0x02;
   }
-  bstr[6] = checkSum;
+  data1 = (uint8_t)panSpeed * 63 / 100;
+
+  if (tiltSpeed < 0) {
+    command2 |= 0x10;
+    tiltSpeed *= (-1);
+  } else if (tiltSpeed > 0) {
+    command2 |= 0x08;
+  }
+  data2 = (uint8_t)tiltSpeed * 63 / 100;
+
+  if (zoomSpeed < 0) {
+    command2 |= 0x40;
+  } else if (zoomSpeed > 0) {
+    command2 |= 0x20;
+  }
+
+  checkSum = (addressPTZ + command1 + command2 + data1 + data2) % 100;
+
+  uint8_t bstr[] = {SYNC,  addressPTZ, command1, command2,
+                    data1, data2,      checkSum, 0x5c};
   write(fd, bstr, sizeof(bstr));
 }
 
 static void init_ptz(int fd) { write(fd, init, 8); }
 
-#define CMD(name, data)                                                        \
-  send_cmd(uart, name, data);                                                  \
+#define CMD(name, zoomSpeed)                                                   \
+  puts(name);                                                                  \
+  send_cmd(uart, 0, 0, zoomSpeed);                                             \
   break;
 
 static void DumpHex(const void *data, size_t size) {
@@ -54,10 +63,9 @@ static void DumpHex(const void *data, size_t size) {
   size_t i, j;
   ascii[16] = '\0';
   for (i = 0; i < size; ++i) {
-    printf("%02X ", ((unsigned char *)data)[i]);
-    if (((unsigned char *)data)[i] >= ' ' &&
-        ((unsigned char *)data)[i] <= '~') {
-      ascii[i % 16] = ((unsigned char *)data)[i];
+    printf("%02X ", ((uint8_t *)data)[i]);
+    if (((uint8_t *)data)[i] >= ' ' && ((uint8_t *)data)[i] <= '~') {
+      ascii[i % 16] = ((uint8_t *)data)[i];
     } else {
       ascii[i % 16] = '.';
     }
@@ -141,13 +149,13 @@ int main() {
       }
       switch (ch) {
       case '-':
-        CMD("Zoom out", zoom_out);
+        CMD("Zoom out", 1);
 
       case '+':
-        CMD("Zoom in", zoom_in);
+        CMD("Zoom in", -1);
 
       case '\n':
-        CMD("Cancel", cancel);
+        CMD("Cancel", 0);
 
       default:
         printf("Unknown command %c\n", ch);
@@ -155,7 +163,7 @@ int main() {
     }
 
     if (pfds[1].revents & POLLIN) {
-      unsigned char rbuf[1024];
+      uint8_t rbuf[1024];
 
       int i = read(uart, rbuf, sizeof(rbuf));
 
@@ -168,6 +176,6 @@ int main() {
         DumpHex(rbuf, i);
     }
   }
-  write(uart, cancel, 8);
+  send_cmd(uart, 0, 0, 0);
   close(uart);
 }
