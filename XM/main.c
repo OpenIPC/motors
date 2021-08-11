@@ -6,6 +6,8 @@
 #include <termios.h>
 #include <unistd.h>
 
+const unsigned char init[] = {0xa5, 0x7b, 0x9e, 0xf0, 0xef, 0xee, 0xe0, 0xf4};
+
 const unsigned char zoom_in[] = {0xc5, 0x01, 0x00, 0x20,
                                  0x00, 0x00, 0x21, 0x5c};
 const unsigned char zoom_out[] = {0xc5, 0x1, 0x0, 0x40, 0x0, 0x0, 0x41, 0x5c};
@@ -87,6 +89,7 @@ int main() {
 
   int flags = fcntl(uart, F_GETFL, 0);
   fcntl(uart, F_SETFL, flags | O_NONBLOCK);
+  write(uart, init, 8);
 
   printf("Xingongmai Motors, get in a car and fasten your safety belt\n");
   printf("Commands: + - Enter (to cancel)\n");
@@ -138,5 +141,6 @@ int main() {
         DumpHex(rbuf, i);
     }
   }
+  write(uart, cancel, 8);
   close(uart);
 }
