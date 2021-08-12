@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/poll.h>
+#include <poll.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -149,10 +149,10 @@ int main() {
       }
       switch (ch) {
       case '-':
-        CMD("Zoom out", 1);
+        CMD("Zoom out", -1);
 
       case '+':
-        CMD("Zoom in", -1);
+        CMD("Zoom in", 1);
 
       case '\n':
         CMD("Cancel", 0);
@@ -168,7 +168,7 @@ int main() {
       int i = read(uart, rbuf, sizeof(rbuf));
 
       if (!i) {
-        printf("UART closed\n");
+        printf("UART closed, make sure system getty is disabled on UART\n");
         return 0;
       }
 
