@@ -1,9 +1,10 @@
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <poll.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -45,6 +46,20 @@ static void send_cmd(int fd, int panSpeed, int tiltSpeed, int zoomSpeed) {
   }
 
   checkSum = (addressPTZ + command1 + command2 + data1 + data2) % 100;
+
+  uint8_t bstr[] = {SYNC,  addressPTZ, command1, command2,
+                    data1, data2,      checkSum, 0x5c};
+  write(fd, bstr, sizeof(bstr));
+}
+
+static void set_focus(int fd, bool near) {
+  uint8_t command1 = 0, command2 = 0, data1 = 0, data2 = 0, checkSum = 0;
+  checkSum = (addressPTZ + command1 + command2 + data1 + data2) % 100;
+
+  if (near)
+    command1 = 1;
+  else
+    command2 = 0x80;
 
   uint8_t bstr[] = {SYNC,  addressPTZ, command1, command2,
                     data1, data2,      checkSum, 0x5c};
@@ -127,7 +142,7 @@ int main() {
   fcntl(uart, F_SETFL, flags | O_NONBLOCK);
 
   printf("Xingongmai Motors, get in a car and fasten your safety belt\n");
-  printf("Commands: + - Enter (to cancel)\n");
+  printf("Commands:\n+ - (Zoom) z x (Focus) Space (Cancel)\n");
 
   while (1) {
 
@@ -155,7 +170,18 @@ int main() {
         CMD("Zoom in", 1);
 
       case '\n':
+      case ' ':
         CMD("Cancel", 0);
+
+      case 'z':
+	puts("Focus near");
+	set_focus(uart, true);
+	break;
+
+      case 'x':
+	puts("Focus far");
+	set_focus(uart, false);
+	break;
 
       default:
         printf("Unknown command %c\n", ch);
