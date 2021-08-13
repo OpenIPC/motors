@@ -68,9 +68,9 @@ static void set_focus(int fd, bool near) {
 
 static void init_ptz(int fd) { write(fd, init, 8); }
 
-#define CMD(name, zoomSpeed)                                                   \
+#define CMD(name, panSpeed, tiltSpeed, zoomSpeed)                              \
   puts(name);                                                                  \
-  send_cmd(uart, 0, 0, zoomSpeed);                                             \
+  send_cmd(uart, panSpeed, tiltSpeed, zoomSpeed);                              \
   break;
 
 static void DumpHex(const void *data, size_t size) {
@@ -142,7 +142,8 @@ int main() {
   fcntl(uart, F_SETFL, flags | O_NONBLOCK);
 
   printf("Xingongmai Motors, get in a car and fasten your safety belt\n");
-  printf("Commands:\n+ - (Zoom) z x (Focus) Space (Cancel)\n");
+  printf(
+      "Commands:\n+ - (Zoom) z x (Focus) h j k l (Pan Tilt) Space (Cancel)\n");
 
   while (1) {
 
@@ -164,24 +165,40 @@ int main() {
       }
       switch (ch) {
       case '-':
-        CMD("Zoom out", -1);
+        CMD("Zoom out", 0, 0, -1);
 
       case '+':
-        CMD("Zoom in", 1);
+        CMD("Zoom in", 0, 0, 1);
 
       case '\n':
       case ' ':
-        CMD("Cancel", 0);
+        CMD("Cancel", 0, 0, 0);
 
       case 'z':
-	puts("Focus near");
-	set_focus(uart, true);
-	break;
+        puts("Focus near");
+        set_focus(uart, true);
+        break;
 
       case 'x':
-	puts("Focus far");
-	set_focus(uart, false);
-	break;
+        puts("Focus far");
+        set_focus(uart, false);
+        break;
+
+        // top
+      case 'h':
+        CMD("Pan left", 100, 0, 0);
+
+      case 'i':
+      case 'l':
+        CMD("Pan right", -100, 0, 0);
+
+      case 'n':
+      case 'j':
+        CMD("Tilt down", 0, -100, 0);
+
+      case 'e':
+      case 'k':
+        CMD("Tilt up", 0, 100, 0);
 
       default:
         printf("Unknown command %c\n", ch);
