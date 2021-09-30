@@ -2,9 +2,11 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/param.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -73,7 +75,7 @@ static void init_ptz(int fd) { write(fd, init, 8); }
   send_cmd(uart, panSpeed, tiltSpeed, zoomSpeed);                              \
   break;
 
-static void DumpHex(const void *data, size_t size) {
+static void dump_hex(const void *data, size_t size) {
   char ascii[17];
   size_t i, j;
   ascii[16] = '\0';
@@ -100,6 +102,27 @@ static void DumpHex(const void *data, size_t size) {
       }
     }
   }
+}
+
+static void parse_incoming(const char *data, size_t size) {
+  if ((size > 0) && (data[0] == 'X')) {
+    char buf[20] = {0};
+    memcpy(buf, data, MIN(sizeof(buf) - 1, size));
+    printf("Magnification: %s\n", buf);
+    return;
+  }
+
+  if ((size == 5) && !memcmp(data, "\xEF\x01\x02\x01", 4)) {
+    if (data[4] == 1) {
+      printf("NIGHT mode\n");
+      return;
+    } else if (data[4] == 0) {
+      printf("DAY mode\n");
+      return;
+    }
+  }
+
+  dump_hex(data, size);
 }
 
 int main() {
@@ -141,7 +164,7 @@ int main() {
   int flags = fcntl(uart, F_GETFL, 0);
   fcntl(uart, F_SETFL, flags | O_NONBLOCK);
 
-  printf("Xingongmai Motors, get in a car and fasten your safety belt\n");
+  printf("Xingongmai UART Motors, get in a car and fasten your safety belt\n");
   printf(
       "Commands:\n+ - (Zoom) z x (Focus) h j k l (Pan Tilt) Space (Cancel)\n");
 
@@ -216,7 +239,7 @@ int main() {
       }
 
       if (i != -1)
-        DumpHex(rbuf, i);
+        parse_incoming(rbuf, i);
     }
   }
   send_cmd(uart, 0, 0, 0);

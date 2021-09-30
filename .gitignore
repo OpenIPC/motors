@@ -1,2 +1,2 @@
 *.o
-xm-motors
+xm-uart-motors-*
