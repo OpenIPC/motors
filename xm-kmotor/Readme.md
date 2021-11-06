@@ -1,5 +1,5 @@
 
-## Load kernel modules before usage
+## Load kernel module before usage
 
 
 ```
