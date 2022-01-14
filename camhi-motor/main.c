@@ -25,7 +25,7 @@ void motor_status_get(int *cmd) {
 }
 
 void sendCommand(int cmd, int sspeed) {
-	int s[2];	
+	int s[3];	
 	s[0] = cmd;
     s[1] = sspeed; //xspeed
 	s[2] = sspeed; //yspeed
