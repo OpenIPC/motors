@@ -202,13 +202,18 @@ static const int AFWeight[15][17] = {
 
 static const ISP_FOCUS_STATISTICS_CFG_S gstFocusCfg = {
     {1,
+#ifdef AF_BLOCK_8X8
+     8,
+     8,
+#else
      17,
      15,
-     3840,
-     2160,
+#endif
+     1920,
+     1080,
      1,
      0,
-     {0, 0, 0, 3840, 2160},
+     {0, 0, 0, 1920, 1080},
      0,
      {0x2, 0x4, 0},
      {1, 0x9bff},
