@@ -11,3 +11,10 @@ Various code to manage motor hardware
 * Driver Manuals on stepper motor drivers - http://www.relmon.com/en/index.php/list/13/33.html
 
 * A little Chinese code - https://download.csdn.net/download/u011212383/10668636
+
+-----
+
+## Similar projects on Github
+
+* https://github.com/Lynch234ok/git_ipc_hi3516C_V3/tree/master/git_ipc
+* https://github.com/stonetan/AF-algorithm
