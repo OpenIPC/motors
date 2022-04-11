@@ -70,8 +70,8 @@ void turn_off(int fd) {
   send_spi(fd, cmd, sizeof(cmd));
 }
 
-void send_focus_cmd(int fd, bool forward) {
-  unsigned char cmd[] = {0x29, 0x5,  0x4 + forward, 0x2a, 0x35, 0xc,
+void send_focus_cmd(int fd, bool forward, int step) {
+  unsigned char cmd[] = {0x29, step, 0x4 + forward, 0x2a, 0x35, 0xc,
                          0x24, 0,    0x4,           0x25, 0x38, 0x1,
                          0x23, 0xff, 0xff,          0x28, 0xff, 0xff};
   send_spi(fd, cmd, sizeof(cmd));
@@ -151,18 +151,17 @@ static void init_lens(int fd) {
   send_spi(fd, cmd, sizeof(cmd));
 }
 
-void set_focus(int fd, bool forward) {
+void set_focus_precise(int fd, bool forward, int step) {
   turn_on(fd);
-  // for (int i = 0; i < 20; i++) {
-  send_focus_cmd(fd, forward);
-  puts("Step");
+  send_focus_cmd(fd, forward, step);
   signal_gpio(GPIO_VD_FZ);
-  //}
   turn_off(fd);
 }
 
+void set_focus(int fd, bool forward) { set_focus_precise(fd, forward, 5); }
+
 void send_zoom_cmd(int fd, bool forward) {
-  unsigned char cmd[] = {0x29, 0x0,  0x0,           0x2a, 0x35, 0xc,
+  unsigned char cmd[] = {0x29, 0xff, 0x4 + forward, 0x2a, 0x35, 0xc,
                          0x24, 0x50, 0x4 + forward, 0x25, 0x38, 0x1,
                          0x23, 0xff, 0xff,          0x28, 0xff, 0xff};
   send_spi(fd, cmd, sizeof(cmd));
@@ -172,8 +171,8 @@ void set_zoom(int fd, bool forward) {
   turn_on(fd);
   for (int i = 0; i < 20; i++) {
     send_zoom_cmd(fd, forward);
-    puts("Step");
     signal_gpio(24);
+    puts("Step");
   }
   turn_off(fd);
 }
@@ -236,58 +235,127 @@ static const ISP_FOCUS_STATISTICS_CFG_S gstFocusCfg = {
     {{-12, -24, 0, 24, 12}, {1, 0, 255, 0, 220, 8, 14}, {15, 12, 2047}},
     {4, {0, 0}, {1, 1}, 0}};
 
-int exit_AF = 0;
-void *AF_proc(void *arg) {
+#define SOURCE right
+
+typedef struct {
+  int left;
+  int right;
+} pair_t;
+
+pair_t calculate_fv() {
+  HI_U32 u32Fv1, u32Fv2;
   HI_S32 s32Ret = HI_SUCCESS;
   ISP_AF_STATISTICS_S stIspAfStatics;
   int ViPipe = 0;
 
-  while (exit_AF == 0) {
-    s32Ret = HI_MPI_ISP_GetVDTimeOut(ViPipe, ISP_VD_FE_START, 5000);
-    if (HI_SUCCESS != s32Ret) {
-      printf("HI_MPI_ISP_GetVDTimeOut error!(s32Ret = 0x%x)\n", s32Ret);
-      return ((void *)-1);
-    }
-
-    s32Ret = HI_MPI_ISP_GetFocusStatistics(ViPipe, &stIspAfStatics);
-    if (HI_SUCCESS != s32Ret) {
-      printf("HI_MPI_ISP_GetStatistics error!(s32Ret = 0x%x)\n", s32Ret);
-      return ((void *)-1);
-    }
-
-    HI_U32 i, j;
-    HI_U32 u32SumFv1 = 0;
-    HI_U32 u32SumFv2 = 0;
-    HI_U32 u32WgtSum = 0;
-    HI_U32 u32Fv1_n, u32Fv2_n, u32Fv1, u32Fv2;
-    for (i = 1; i < gstFocusCfg.stConfig.u16Vwnd; i++) {
-      for (j = 1; j < gstFocusCfg.stConfig.u16Hwnd; j++) {
-        HI_U32 u32H1 = stIspAfStatics.stBEAFStat.stZoneMetrics[i][j].u16h1;
-        HI_U32 u32H2 = stIspAfStatics.stBEAFStat.stZoneMetrics[i][j].u16h2;
-        HI_U32 u32V1 = stIspAfStatics.stBEAFStat.stZoneMetrics[i][j].u16v1;
-        HI_U32 u32V2 = stIspAfStatics.stBEAFStat.stZoneMetrics[i][j].u16v2;
-        u32Fv1_n = (u32H1 * ALPHA + u32V1 * ((1 << BLEND_SHIFT) - ALPHA)) >>
-                   BLEND_SHIFT;
-        u32Fv2_n = (u32H2 * BELTA + u32V2 * ((1 << BLEND_SHIFT) - BELTA)) >>
-                   BLEND_SHIFT;
-
-        u32SumFv1 += AFWeight[i][j] * u32Fv1_n;
-        u32SumFv2 += AFWeight[i][j] * u32Fv2_n;
-        u32WgtSum += AFWeight[i][j];
-      }
-    }
-
-    u32Fv1 = u32SumFv1 / u32WgtSum;
-    u32Fv2 = u32SumFv2 / u32WgtSum;
-    printf("u32Fv1=%4d u32Fv2=%4d\n", u32Fv1, u32Fv2);
+  s32Ret = HI_MPI_ISP_GetVDTimeOut(ViPipe, ISP_VD_FE_START, 5000);
+  if (HI_SUCCESS != s32Ret) {
+    printf("HI_MPI_ISP_GetVDTimeOut error!(s32Ret = 0x%x)\n", s32Ret);
+    return (pair_t){-1, -1};
   }
 
+  s32Ret = HI_MPI_ISP_GetFocusStatistics(ViPipe, &stIspAfStatics);
+  if (HI_SUCCESS != s32Ret) {
+    printf("HI_MPI_ISP_GetStatistics error!(s32Ret = 0x%x)\n", s32Ret);
+    return (pair_t){-1, -1};
+  }
+
+  HI_U32 i, j;
+  HI_U32 u32SumFv1 = 0;
+  HI_U32 u32SumFv2 = 0;
+  HI_U32 u32WgtSum = 0;
+  HI_U32 u32Fv1_n, u32Fv2_n;
+  for (i = 1; i < gstFocusCfg.stConfig.u16Vwnd; i++) {
+    for (j = 1; j < gstFocusCfg.stConfig.u16Hwnd; j++) {
+      HI_U32 u32H1 = stIspAfStatics.stBEAFStat.stZoneMetrics[i][j].u16h1;
+      HI_U32 u32H2 = stIspAfStatics.stBEAFStat.stZoneMetrics[i][j].u16h2;
+      HI_U32 u32V1 = stIspAfStatics.stBEAFStat.stZoneMetrics[i][j].u16v1;
+      HI_U32 u32V2 = stIspAfStatics.stBEAFStat.stZoneMetrics[i][j].u16v2;
+      u32Fv1_n =
+          (u32H1 * ALPHA + u32V1 * ((1 << BLEND_SHIFT) - ALPHA)) >> BLEND_SHIFT;
+      u32Fv2_n =
+          (u32H2 * BELTA + u32V2 * ((1 << BLEND_SHIFT) - BELTA)) >> BLEND_SHIFT;
+
+      u32SumFv1 += AFWeight[i][j] * u32Fv1_n;
+      u32SumFv2 += AFWeight[i][j] * u32Fv2_n;
+      u32WgtSum += AFWeight[i][j];
+    }
+  }
+
+  u32Fv1 = u32SumFv1 / u32WgtSum;
+  u32Fv2 = u32SumFv2 / u32WgtSum;
+
+  printf("u32Fv1=%4d u32Fv2=%4d\n", u32Fv1, u32Fv2);
+
+  return (pair_t){u32Fv1, u32Fv2};
+}
+
+int exit_AF = 0;
+int fd = -1;
+
+// Basic Autofocus algorithm:
+// Stage 1: find starting direction from current point: step right, check
+// that it's the right direction, otherwise change direction
+// Stage 2: find maximum towards direction
+// Stage 3: stop at maximum when well enough
+void *AF_proc(void *arg) {
+  int maxValue = 0;
+  int cntMissed = 0, maxMissed = 4;
+
+  // 1. figure out current focus values
+  pair_t initial = calculate_fv();
+
+  // 2. move focus to another point as much as possible
+  set_focus_precise(fd, true, 0x50);
+  sleep(2);
+
+  // 3. figure out values of next step
+  pair_t current = calculate_fv();
+
+  if (current.SOURCE == initial.SOURCE) {
+    puts("Nothing to do, unknown dirrection. Blurry image?");
+    goto quit;
+  }
+
+  bool direction = current.left > initial.left;
+  printf("DIRECTION %d\n", direction);
+
+  int step = 0x16;
+
+  while (exit_AF == 0) {
+    set_focus_precise(fd, direction, step);
+    usleep(200000);
+
+    current = calculate_fv();
+
+    if (current.SOURCE > maxValue) {
+      maxValue = current.SOURCE;
+    } else {
+      cntMissed++;
+      direction = !direction;
+      printf("DIRECTION %d, step %#X\n", direction, step);
+      if (cntMissed == maxMissed) {
+        cntMissed = 0;
+        step /= 2;
+        maxValue = 0;
+        maxMissed--;
+        if (step == 0 || maxMissed == 0) {
+          puts("Out");
+          break;
+        }
+      }
+    }
+  }
+
+quit:
+  // ensure thread stopped
+  exit_AF = 1;
   return ((void *)0);
 }
 
 pthread_t g_af_thread;
 static void toggle_af(void) {
-  if (g_af_thread) {
+  if (exit_AF == 0 && g_af_thread) {
     exit_AF = 1;
     pthread_join(g_af_thread, NULL);
     g_af_thread = 0;
@@ -362,7 +430,7 @@ int main(int argc, char *argv[]) {
   ctrl.c_lflag &= ~ISIG;   // disable system Ctrl-C
   tcsetattr(STDIN_FILENO, TCSANOW, &ctrl);
 
-  int fd = open("/dev/spidev2.0", O_RDWR);
+  fd = open("/dev/spidev2.0", O_RDWR);
   if (fd == -1) {
     fprintf(stderr, "main: opening device file: %s: %s\n", DEVICE_NAME,
             strerror(errno));
@@ -422,12 +490,12 @@ int main(int argc, char *argv[]) {
 
     case 'z':
       puts("Focus near");
-      set_focus(fd, false);
+      set_focus_precise(fd, false,0xff);
       break;
 
     case 'x':
       puts("Focus far");
-      set_focus(fd, true);
+      set_focus_precise(fd, true,0xff);
       break;
 
     case 'a':
