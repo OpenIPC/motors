@@ -18,3 +18,4 @@ Various code to manage motor hardware
 
 * https://github.com/Lynch234ok/git_ipc_hi3516C_V3/tree/master/git_ipc
 * https://github.com/stonetan/AF-algorithm
+* https://github.com/wztforest/test/tree/236bd04cad7aff12e56b7d26cf785b61a23904c9/ipc/hisi-vsrd/ipcam.hi3518A/src/ptz
