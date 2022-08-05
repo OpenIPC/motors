@@ -164,7 +164,7 @@ int main() {
   int flags = fcntl(uart, F_GETFL, 0);
   fcntl(uart, F_SETFL, flags | O_NONBLOCK);
 
-  printf("Xingongmai UART Motors, get in a car and fasten your safety belt\n");
+  printf("Xiongmai UART Motors, get in a car and fasten your safety belt\n");
   printf(
       "Commands:\n+ - (Zoom) z x (Focus) h j k l (Pan Tilt) Space (Cancel)\n");
 
