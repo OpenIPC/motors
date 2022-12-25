@@ -8,11 +8,12 @@ devmem 0x120101BC 32 0x801282
 ```
 
 ```
--d Direction step (  u (Zoom+),  d (Zoom-),  l (Focus-),  r (Focus+),  s (Stop))
+-d Direction step ( i (Init),  u (Zoom+),  d (Zoom-),  l (Focus-),  r (Focus+),  s (Stop))
 -s Speed step (default 5)
 ```
 
 ```
+i2c-motor -d i           # init motors
 i2c-motor -d r -s 50
 i2c-motor -d l -s 50
 i2c-motor -d d -s 50
