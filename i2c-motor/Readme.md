@@ -17,6 +17,7 @@ i2c-motor -d r -s 50
 i2c-motor -d l -s 50
 i2c-motor -d d -s 50
 i2c-motor -d u -s 50
+i2c-motor -d s           # stop motors
 ```
 
 
