@@ -3,6 +3,8 @@
 ```
 devmem 0x112C0058 32 0x1032         # Set I2C2_SCL, connected to GPIO7_0 (gpio56)
 devmem 0x112C005C 32 0x1032         # Set I2C2_SDA, connected to GPIO7_1 (gpio57)
+devmem 0x100C000C 32 0x1
+devmem 0x120101BC 32 0x801282
 ```
 
 ```
