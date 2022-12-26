@@ -1,7 +1,7 @@
 /*
- * Simple I2C example
+ * I2C Motor driver
  *
- * Copyright 2017 Joel Stanley <joel@jms.id.au>
+ * Copyright 2022 Aleksander Volkov <swit.939@gmail.com>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -12,16 +12,9 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
-//#include <err.h>
-//#include <errno.h>
-
-//#include <linux/types.h>
 #include <linux/i2c.h>
 #include <linux/i2c-dev.h>
-
-//#include <sys/ioctl.h>
 #include <sys/types.h>
-//#include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -60,7 +53,7 @@ static inline __s32 i2c_smbus_write_byte_data(int file, __u8 command, __u8 value
 
 void initMotor()
 {
-uint8_t data, addr = 0x10;//, data, reg = 0x00, value = 0x00;
+uint8_t data, addr = 0x10;
 const char *path = "/dev/i2c-2";
 int fd, rc;
 
@@ -117,11 +110,9 @@ void sendCommand(int cmd, int sspeed)
         const char *path = "/dev/i2c-2";
         int fd,fp, rc,rp,sa,sb,s;
 
-s = sspeed*40;
+s = sspeed*20;
 sb = s / 256;
 sa = s - sb * 256;
-//printf("sa %i\n", sa);
-//printf("sb %i\n", sb);
 
 fd = open(path, O_RDWR);
 rc = ioctl(fd, I2C_SLAVE, addr);
@@ -161,14 +152,9 @@ int main(int argc, char **argv)
 	uint8_t data, addr = 0x10, reg = 0x00, value = 0x00;
 	const char *path = "/dev/i2c-2";
 	int file, rc;
-
-initMotor();
-
 	int steps[5];
 	char direction = 's';
-        int stepspeed = 20;
-//	int xpos = 0;
-//	int ypos = 0;
+        int stepspeed = 5;
 	int c;
 	//sendCommand(0, stepspeed);	//Stop
 	//sendCommand(1, stepspeed);	//Zoom-
@@ -215,21 +201,19 @@ initMotor();
         case 's':			//stop
             sendCommand(0, stepspeed);
             break;
-
+        case 'i':                       //stop
+            initMotor();
+            break;
         default:
             printf("Invalid Direction Argument %c\n", direction);
-			printf("Usage : %s -d\n" 
+			printf("Usage : %s -d\n"
+                        "\t i (Init)\n"
 			"\t u (Zoom+)\n"
-			"\t d (Zoom-)\n" 
+			"\t d (Zoom-)\n"
 			"\t l (Focus-)\n"
 			"\t r (Focus+)\n"
 			"\t s (Stop)\n", argv[0]);
             exit(EXIT_FAILURE);
     }
-/* 	sendCommand(3, stepspeed);
-	motor_status_get(steps);
-	printf("Status Move: %d.\n", steps[0]);
-	printf("X Steps %d.\n", steps[1]);
-	printf("Y Steps %d.\n", steps[2]); */
 	return 0;
 }
