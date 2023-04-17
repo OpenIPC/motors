@@ -1,6 +1,3 @@
-CDG123 - My copy of OpenIPC motors specificsally to work on ptz features and amend xm-kmotor
-
-
 # Motors
 
 Various code to manage motor hardware
