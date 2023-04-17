@@ -96,6 +96,50 @@ void show_sage() {
   printf("Unknow: %d.\n", steps[5]);
 }
 
+void JSON_status(){
+  //return xpos,ypos and status in JSON string
+  //allows passing straight back to async call
+  //with little effort and ability to track x,y position
+  int steps[6];
+
+  motor_status_get(steps);
+  printf("{");
+  printf("\"status\":%d", steps[0]);
+  printf(",");
+  printf("\"xpos\":%d", steps[1]);
+  printf(",");
+  printf("\"ypos\":%d", steps[2]);
+  printf("}");
+}
+
+void JSON_initial(){
+  //return all known parameters in JSON string
+  //idea is when client page loads in browser we
+  //get current details from camera
+  int steps[6];
+  int maxsteps[3];
+
+  motor_status_get(steps);
+  printf("{");
+  printf("\"status\":%d", steps[0]);
+  printf(",");
+  printf("\"xpos\":%d", steps[1]);
+  printf(",");
+  printf("\"ypos\":%d", steps[2]);
+
+  motor_get_maxsteps(maxsteps);
+  printf(",");
+  printf("\"xmax\":%d", maxsteps[1]);
+  printf(",");
+  printf("\"ymax\":%d", maxsteps[2]);
+  printf(",");
+  printf("\"maxstep 0 is \":%d", maxsteps[0]);
+
+  printf("}");
+
+}
+
+
 void sendCommand(int cmd, int sspeed) {
   int s[3];
   s[0] = cmd;
@@ -132,13 +176,25 @@ int main(int argc, char *argv[]) {
     case 'y':
       ypos = atoi(optarg);
       break;
+    case 'j':
+      //get x and y current positions and status
+      JSON_status();
+      exit (EXIT_SUCCESS);
+      break;
+    case 'i':
+      //get all initial values
+      JSON_initial();
+      exit (EXIT_SUCCESS);
+      break;
     default:
       printf("Invalid Argument %c\n", c);
       printf("Usage : %s\n"
              "\t -d Direction step\n"
              "\t -s Speed step (default 5)\n"
              "\t -x X position/step (default 0)\n"
-             "\t -y Y position/step (default 0) .\n",
+             "\t -y Y position/step (default 0) .\n"
+             "\t -j return json string xpos,ypos,status.\n"
+             "\t -i return all camera parameters\n",
              argv[0]);
       exit(EXIT_FAILURE);
     }
