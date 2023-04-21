@@ -104,11 +104,17 @@ void JSON_status(){
 
   motor_status_get(steps);
   printf("{");
-  printf("\"status\":%d", steps[0]);
+  printf("\"status\":\"%d\"", steps[0]);
   printf(",");
-  printf("\"xpos\":%d", steps[1]);
+  printf("\"xpos\":\"%d\"", steps[1]);
   printf(",");
-  printf("\"ypos\":%d", steps[2]);
+  printf("\"ypos\":\"%d\"", steps[2]);
+  printf(",");
+  printf("\"unkown\":\"%d\"", steps[3]);
+  printf(",");
+  printf("\"unkown\":\"%d\"", steps[4]);
+  printf(",");
+  printf("\"unkown\":\"%d\"", steps[5]);
   printf("}");
 }
 
@@ -121,19 +127,19 @@ void JSON_initial(){
 
   motor_status_get(steps);
   printf("{");
-  printf("\"status\":%d", steps[0]);
+  printf("\"status\":\"%d\"", steps[0]);
   printf(",");
-  printf("\"xpos\":%d", steps[1]);
+  printf("\"xpos\":\"%d\"", steps[1]);
   printf(",");
-  printf("\"ypos\":%d", steps[2]);
+  printf("\"ypos\":\"%d\"", steps[2]);
 
   motor_get_maxsteps(maxsteps);
   printf(",");
-  printf("\"xmax\":%d", maxsteps[1]);
+  printf("\"xmax\":\"%d\"", maxsteps[1]);
   printf(",");
-  printf("\"ymax\":%d", maxsteps[2]);
+  printf("\"ymax\":\"%d\"", maxsteps[2]);
   printf(",");
-  printf("\"maxstep 0 is \":%d", maxsteps[0]);
+  printf("\"maxstep 0 is \":\"%d\"", maxsteps[0]);
 
   printf("}");
 
