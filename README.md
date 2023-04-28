@@ -12,6 +12,8 @@ Various code to manage motor hardware
 
 * A little Chinese code - https://download.csdn.net/download/u011212383/10668636
 
+* Driver for ms32006 - https://github.com/song7788/driver_for_ms32006
+
 -----
 
 ## Similar projects on Github
