@@ -98,7 +98,7 @@ void show_sage() {
 
 void JSON_status(){
   //return xpos,ypos and status in JSON string
-  //allows passing straight back to async call
+  //allows passing straight back to async call from ptzclient.cgi
   //with little effort and ability to track x,y position
   int steps[6];
 
@@ -110,11 +110,11 @@ void JSON_status(){
   printf(",");
   printf("\"ypos\":\"%d\"", steps[2]);
   printf(",");
-  printf("\"unkown\":\"%d\"", steps[3]);
+  printf("\"unknown\":\"%d\"", steps[3]);
   printf(",");
-  printf("\"unkown\":\"%d\"", steps[4]);
+  printf("\"unknown\":\"%d\"", steps[4]);
   printf(",");
-  printf("\"unkown\":\"%d\"", steps[5]);
+  printf("\"unknown\":\"%d\"", steps[5]);
   printf("}");
 }
 
@@ -139,7 +139,11 @@ void JSON_initial(){
   printf(",");
   printf("\"ymax\":\"%d\"", maxsteps[2]);
   printf(",");
-  printf("\"maxstep 0 is \":\"%d\"", maxsteps[0]);
+  printf("\"unknown\":\"%d\"", steps[3]);
+  printf(",");
+  printf("\"unknown\":\"%d\"", steps[4]);
+  printf(",");
+  printf("\"unknown\":\"%d\"", steps[5]);
 
   printf("}");
 
@@ -163,7 +167,7 @@ int main(int argc, char *argv[]) {
   int ypos = 0;
   int c;
 
-  while ((c = getopt(argc, argv, "d:s:x:y:")) != -1) {
+  while ((c = getopt(argc, argv, "d:s:x:y:ji")) != -1) {
     switch (c) {
     case 'd':
       direction = optarg[0];
@@ -200,7 +204,7 @@ int main(int argc, char *argv[]) {
              "\t -x X position/step (default 0)\n"
              "\t -y Y position/step (default 0) .\n"
              "\t -j return json string xpos,ypos,status.\n"
-             "\t -i return all camera parameters\n",
+             "\t -i return json string for all camera parameters\n",
              argv[0]);
       exit(EXIT_FAILURE);
     }
