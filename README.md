@@ -1,6 +1,3 @@
-CDG123 - My copy of OpenIPC motors specificsally to work on ptz features and amend xm-kmotor
-
-
 # Motors
 
 Various code to manage motor hardware
@@ -14,6 +11,8 @@ Various code to manage motor hardware
 * Driver Manuals on stepper motor drivers - http://www.relmon.com/en/index.php/list/13/33.html
 
 * A little Chinese code - https://download.csdn.net/download/u011212383/10668636
+
+* Driver for ms32006 - https://github.com/song7788/driver_for_ms32006
 
 -----
 
