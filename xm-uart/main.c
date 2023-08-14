@@ -9,6 +9,7 @@
 #include <sys/param.h>
 #include <termios.h>
 #include <unistd.h>
+#include <getopt.h>
 
 const int addressPTZ = 1;
 
@@ -125,14 +126,30 @@ static void parse_incoming(const char *data, size_t size) {
   dump_hex(data, size);
 }
 
-int main() {
+int main(int argc, char *argv[]) {
   struct termios ctrl;
   tcgetattr(STDIN_FILENO, &ctrl);
   ctrl.c_lflag &= ~ICANON; // turning off canonical mode makes input unbuffered
   ctrl.c_lflag &= ~ECHO;   // disable echo
   tcsetattr(STDIN_FILENO, TCSANOW, &ctrl);
+  int c;
+  char *device = "/dev/ttyAMA0";
+  
+  while ((c = getopt(argc, argv, "d:")) != -1) {
+    switch (c) {
+      case 'd':
+        device = optarg;
+        break;
+      default:
+        printf("Invalid Argument %c\n", c);
+        printf("Usage : %s\n");       
+        printf("\t -d tty device, default /dev/ttyAMA0\n\n");
+        printf("Commands:\n+ - (Zoom) z x (Focus) h j k l (Pan Tilt) Space (Cancel)\n");
+        return (-1);
+    }
+  }
 
-  int uart = open("/dev/ttyAMA0", O_RDWR | O_NOCTTY);
+  int uart = open(device, O_RDWR | O_NOCTTY);
   if (uart == -1) {
     printf("Error no is : %d\n", errno);
     printf("Error description is : %s\n", strerror(errno));
