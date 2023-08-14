@@ -124,24 +124,24 @@ rc = ioctl(fd, I2C_SLAVE, addr);
                 data = i2c_smbus_write_byte_data(fd, 0x00, 0x01);
             break;
         case 1:                 //Zoom-
-		data = i2c_smbus_write_byte_data(fd, 0x03, sa);
-		data = i2c_smbus_write_byte_data(fd, 0x04, 0xc0 + sb);
-		data = i2c_smbus_write_byte_data(fd, 0x09, 0xcf);
+                data = i2c_smbus_write_byte_data(fd, 0x03, sa);
+                data = i2c_smbus_write_byte_data(fd, 0x04, 0xc0 + sb);
+                data = i2c_smbus_write_byte_data(fd, 0x09, 0x8f);
             break;
         case 2:                 //Zoom+
                 data = i2c_smbus_write_byte_data(fd, 0x03, sa);
                 data = i2c_smbus_write_byte_data(fd, 0x04, 0xb0 + sb);
-                data = i2c_smbus_write_byte_data(fd, 0x09, 0xcf);
+                data = i2c_smbus_write_byte_data(fd, 0x09, 0x8f);
             break;
         case 3:                 //Focus-
                 data = i2c_smbus_write_byte_data(fd, 0x07, sa);
                 data = i2c_smbus_write_byte_data(fd, 0x08, 0xc0 + sb);
-                data = i2c_smbus_write_byte_data(fd, 0x09, 0xcf);
+                data = i2c_smbus_write_byte_data(fd, 0x09, 0x4f);
             break;
         case 4:                 //Focus+
                 data = i2c_smbus_write_byte_data(fd, 0x07, sa);
                 data = i2c_smbus_write_byte_data(fd, 0x08, 0xb0 + sb);
-                data = i2c_smbus_write_byte_data(fd, 0x09, 0xcf);
+                data = i2c_smbus_write_byte_data(fd, 0x09, 0x4f);
             break;
     }
 close(fd);
