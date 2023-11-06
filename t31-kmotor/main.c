@@ -113,9 +113,9 @@ void motor_wait_idle()
 {
   while (motor_is_busy())
   {
-    printf(" == moving, waiting 1s\n");
-    sleep(1);
+    usleep(100000);
   }
+    printf(" == moving, waiting...\n");
 }
 
 void motor_steps(int xsteps, int ysteps, int stepspeed)
@@ -257,6 +257,7 @@ int main(int argc, char *argv[])
       exit(EXIT_SUCCESS);
       break;
     case 'r': // reset
+      printf(" == Reset position, please wait\n");
       struct motor_reset_data motor_reset_data;
       memset(&motor_reset_data, 0, sizeof(motor_reset_data));
       ioctl(fd, MOTOR_RESET, &motor_reset_data);
