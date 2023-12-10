@@ -2,15 +2,24 @@
 
 Various code to manage motor hardware
 
+## Some theory behind
+
+[Basic autofocus algorithms](https://www.csie.ntu.edu.tw/~fuh/personal/Images&Recognition.Vol.9,No.4.Autofocus.pdf)
+
+[Learning approach for autofocus](https://openaccess.thecvf.com/content_CVPR_2020/papers/Herrmann_Learning_to_Autofocus_CVPR_2020_paper.pdf)
+
+[Improving the accuracy and low-light performance of contrast-based autofocus using
+supervised machine learning](https://cs.uwaterloo.ca/~vanbeek/Publications/prl-2015.pdf)
+
 -----
 
-## Links
+## Various links
 
 * XM AF Module description [Function Command List on p.6-10](doc/IVG-N83020S-T.pdf)
 
 * Driver Manuals on stepper motor drivers - http://www.relmon.com/en/index.php/list/13/33.html
 
-* A little Chinese code - https://download.csdn.net/download/u011212383/10668636
+* Some code for ms41929 motor driver - https://download.csdn.net/download/u011212383/10668636
 
 * Driver for ms32006 - https://github.com/song7788/driver_for_ms32006
 
