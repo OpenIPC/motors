@@ -1,14 +1,19 @@
 
 ## Load kernel module before use
-t31-kmotor is a command line tool to be able to send commands to the sample_motor.ko camera module. By default this module is not loaded and so it is necessary to enter the following commands:
+ingenic-motor is a command line tool to be able to send commands to the motor.ko camera module. By default this module is not loaded and so it is necessary to enter the following commands:
 
 ```
-modprobe sample_pwm_core
-modprobe sample_pwm_hal
-modprobe sample_motor hmaxstep=2130 vmaxstep=1600
+modprobe motor hmaxstep=2540 vmaxstep=720 hst1=52 hst2=53 hst3=57 hst4=51 vst1=59 vst2=61 vst3=62 vst4=63
 ```
 
-Note that the maximum steps for the horizontal and vertical motors are passed as arguments when inserting the `sample_motor` module.
+To automate this process during boot, add the line `motor hmaxstep=2540 vmaxstep=720 hst1=52 hst2=53 hst3=57 hst4=51 vst1=59 vst2=61 vst3=62 vst4=63` to `/etc/modules`.
+
+## Module Configuration
+
+- `hstX`: Horizontal motor phase GPIO pins.
+- `vstX`: Vertical motor phase GPIO pins.
+- `hmaxstep` and `vmaxstep`: Specify the maximum number of steps your hardware can handle.
+Note that the maximum steps for the horizontal and vertical motors are passed as arguments when inserting the `motor` module.
 
 ### Examples for Wyze Pan Cam v3
 
@@ -18,27 +23,25 @@ ssh root@ip.of.your.camera
 ```
 2) load the kernel module:
 
-check if the sample_pwm_core / sample_pwm_hal / sample_motor module are loaded:
+check if the motor module is loaded:
 ```
 lsmod
 ```
 if any of them are on the list then unload them first:
 ```
-rmmod sample_pwm_core; rmmod sample_pwm_hal; rmmod sample_motor
+rmmod motor
 ```
 load the modules with parameters (you may need to experiment with the hmaxstep and vmaxstep values for your specific camera):
 
 ```
-insmod /path/to/sample_pwm_core.ko
-insmod /path/to/sample_pwm_hal.ko
-insmod /path/to/sample_motor.ko hmaxstep=2130 vmaxstep=1600
+insmod /path/to/motor.ko hmaxstep=2130 vmaxstep=1600
 ```
 
 3) testing
 
 By passing the -S command line argument, the current status and x,y parameters will be returned:
 ```
-t31-kmotor -S
+ingenic-motor -S
 ```
 it will look like this:
 ```
@@ -53,7 +56,7 @@ Note: Seems like `900` is the maximum speed of the kernel module, hence why it c
 
 ### Command line options
 ```
-Usage : t31-kmotor
+Usage : ingenic-motor
          -d Direction step.
          -s Speed step (default 900).
          -x X position/step (default 0).
@@ -68,25 +71,25 @@ Usage : t31-kmotor
 
 * go to mid position of X and Y (assuming max X steps 2130 and max y steps 1600):
 ```
-t31-kmotor -d t -x 1065 -y 800
+ingenic-motor -d t -x 1065 -y 800
 ```
 * go to position of begining of X and Y
 ```
-t31-kmotor -d h -x 0 -y 0 
+ingenic-motor -d h -x 0 -y 0 
 ```
 * go to x 1065 and y 0
 ```
-t31-kmotor -d h -x 1992 -y 0 
+ingenic-motor -d h -x 1992 -y 0 
 ```
 * get camera details as json string
 ```
-t31-kmotor -i
+ingenic-motor -i
 ```
 * stop the motors
 ```
-t31-kmotor -d s
+ingenic-motor -d s
 ```
 * reset the motors (to the center)
 ```
-t31-kmotor -r
+ingenic-motor -r
 ```
