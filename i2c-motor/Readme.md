@@ -1,4 +1,4 @@
-## Experimental usage for MS32006 motors driver
+## Experimental tool for MS32006 motors driver
 
 ### Basic init
 ```
