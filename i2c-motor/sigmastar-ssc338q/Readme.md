@@ -30,6 +30,26 @@ make CC=arm-linux-gnueabihf-gcc
 
 ---
 
+## 🌐 OpenIPC Web UI Integration
+
+To enable the on-screen PTZ overlay controls on the live video stream in OpenIPC Web UI:
+
+1. Enable PTZ in the U-Boot environment:
+   ```sh
+   fw_setenv ptz 1
+   ```
+2. Ensure the binary is installed at `/usr/bin/motor`:
+   ```sh
+   cp motor /usr/bin/motor
+   chmod +x /usr/bin/motor
+   ```
+3. Open the camera Web UI in your browser (`http://<camera-ip>`). The live stream preview will now display interactive on-screen controls:
+   - **Up / Down**: Smooth simultaneous parfocal optical zoom (IN / OUT).
+   - **Left / Right**: Fine focus adjustments (FAR / NEAR).
+   - **Center (OK)**: Full mechanical homing & optical autofocus calibration.
+
+---
+
 ## 🎮 Commands
 
 ```sh
@@ -46,4 +66,5 @@ motor -d d -s 10        # Zoom Out (Parfocal)
 motor -d r -s 5         # Fine Focus Near
 motor -d l -s 5         # Fine Focus Far
 motor -j                # JSON status output for Web UI & Majestic
+motor -i                # Full camera parameters JSON for Web UI initialization
 ```
