@@ -140,22 +140,34 @@ int raw_step_zoom_chunk(const char *bus, unsigned char addr, int chunk_steps, in
     int fd = open(bus, O_RDWR);
     if (fd < 0) return -1;
 
+    int ret = 0;
     // Wake chip & enable excitation
-    i2c_write(fd, addr, 0x00, 0x01);
-    i2c_write(fd, addr, 0x0A, 0x08);
+    ret |= i2c_write(fd, addr, 0x00, 0x01);
+    ret |= i2c_write(fd, addr, 0x0A, 0x08);
 
     set_channel_speeds(fd, addr, pps, pps);
 
     unsigned char z_lo = chunk_steps & 0xFF;
     unsigned char z_hi = (dir ? 0xC0 : 0x80) | ((chunk_steps >> 8) & 0x0F);
 
-    i2c_write(fd, addr, 0x03, 0x00);
-    i2c_write(fd, addr, 0x04, 0x00);
-    i2c_write(fd, addr, 0x07, z_lo);
-    i2c_write(fd, addr, 0x08, z_hi);
-    i2c_write(fd, addr, 0x09, 0x4F); // Trigger Channel 2 (Zoom)
+    ret |= i2c_write(fd, addr, 0x03, 0x00);
+    ret |= i2c_write(fd, addr, 0x04, 0x00);
+    ret |= i2c_write(fd, addr, 0x07, z_lo);
+    ret |= i2c_write(fd, addr, 0x08, z_hi);
+    ret |= i2c_write(fd, addr, 0x09, 0x4F); // Trigger Channel 2 (Zoom)
 
     close(fd);
+
+    if (ret < 0) {
+        // Attempt coil shutdown on failure
+        fd = open(bus, O_RDWR);
+        if (fd >= 0) {
+            i2c_write(fd, addr, 0x0A, 0x00);
+            i2c_write(fd, addr, 0x00, 0x00);
+            close(fd);
+        }
+        return -1;
+    }
 
     int sleep_ms = (chunk_steps * 1000) / pps + 40;
     usleep(sleep_ms * 1000);
@@ -178,9 +190,10 @@ int raw_step_focus_chunk(const char *bus, unsigned char addr, int chunk_steps, i
     int fd = open(bus, O_RDWR);
     if (fd < 0) return -1;
 
+    int ret = 0;
     // Wake chip & enable excitation
-    i2c_write(fd, addr, 0x00, 0x01);
-    i2c_write(fd, addr, 0x0A, 0x08);
+    ret |= i2c_write(fd, addr, 0x00, 0x01);
+    ret |= i2c_write(fd, addr, 0x0A, 0x08);
 
     set_channel_speeds(fd, addr, pps, pps);
 
@@ -188,13 +201,24 @@ int raw_step_focus_chunk(const char *bus, unsigned char addr, int chunk_steps, i
     unsigned char f_lo = chunk_steps & 0xFF;
     unsigned char f_hi = (hw_dir ? 0xC0 : 0x80) | ((chunk_steps >> 8) & 0x0F);
 
-    i2c_write(fd, addr, 0x07, 0x00);
-    i2c_write(fd, addr, 0x08, 0x00);
-    i2c_write(fd, addr, 0x03, f_lo);
-    i2c_write(fd, addr, 0x04, f_hi);
-    i2c_write(fd, addr, 0x09, 0x8F); // Trigger Channel 1 (Focus)
+    ret |= i2c_write(fd, addr, 0x07, 0x00);
+    ret |= i2c_write(fd, addr, 0x08, 0x00);
+    ret |= i2c_write(fd, addr, 0x03, f_lo);
+    ret |= i2c_write(fd, addr, 0x04, f_hi);
+    ret |= i2c_write(fd, addr, 0x09, 0x8F); // Trigger Channel 1 (Focus)
 
     close(fd);
+
+    if (ret < 0) {
+        // Attempt coil shutdown on failure
+        fd = open(bus, O_RDWR);
+        if (fd >= 0) {
+            i2c_write(fd, addr, 0x0A, 0x00);
+            i2c_write(fd, addr, 0x00, 0x00);
+            close(fd);
+        }
+        return -1;
+    }
 
     int sleep_ms = (chunk_steps * 1000) / pps + 40;
     usleep(sleep_ms * 1000);
@@ -218,9 +242,10 @@ int raw_step_dual_sync(const char *bus, unsigned char addr, int z_steps, int z_d
     int fd = open(bus, O_RDWR);
     if (fd < 0) return -1;
 
+    int ret = 0;
     // Wake chip & enable excitation
-    i2c_write(fd, addr, 0x00, 0x01);
-    i2c_write(fd, addr, 0x0A, 0x08);
+    ret |= i2c_write(fd, addr, 0x00, 0x01);
+    ret |= i2c_write(fd, addr, 0x0A, 0x08);
 
     // Calculate proportional speeds so both motors start and finish together
     int max_steps = (z_steps > f_steps) ? z_steps : f_steps;
@@ -239,17 +264,28 @@ int raw_step_dual_sync(const char *bus, unsigned char addr, int z_steps, int z_d
     unsigned char z_lo = z_steps & 0xFF;
     unsigned char z_hi = (z_dir ? 0xC0 : 0x80) | ((z_steps >> 8) & 0x0F);
 
-    i2c_write(fd, addr, 0x03, f_lo);
-    i2c_write(fd, addr, 0x04, f_hi);
-    i2c_write(fd, addr, 0x07, z_lo);
-    i2c_write(fd, addr, 0x08, z_hi);
+    ret |= i2c_write(fd, addr, 0x03, f_lo);
+    ret |= i2c_write(fd, addr, 0x04, f_hi);
+    ret |= i2c_write(fd, addr, 0x07, z_lo);
+    ret |= i2c_write(fd, addr, 0x08, z_hi);
 
     unsigned char trigger = 0xCF;
     if (z_steps == 0) trigger = 0x8F;
     else if (f_steps == 0) trigger = 0x4F;
-    i2c_write(fd, addr, 0x09, trigger);
+    ret |= i2c_write(fd, addr, 0x09, trigger);
 
     close(fd);
+
+    if (ret < 0) {
+        // Attempt coil shutdown on failure
+        fd = open(bus, O_RDWR);
+        if (fd >= 0) {
+            i2c_write(fd, addr, 0x0A, 0x00);
+            i2c_write(fd, addr, 0x00, 0x00);
+            close(fd);
+        }
+        return -1;
+    }
 
     int max_time_ms = 0;
     if (z_steps > 0 && pps_z > 0) {
@@ -281,7 +317,10 @@ int move_zoom(const char *bus, unsigned char addr, int total_steps, int dir, int
     int remaining = total_steps;
     while (remaining > 0) {
         int chunk = (remaining > 3000) ? 3000 : remaining;
-        raw_step_zoom_chunk(bus, addr, chunk, dir, pps);
+        if (raw_step_zoom_chunk(bus, addr, chunk, dir, pps) < 0) {
+            printf(" Failed (I2C error).\n");
+            return -1;
+        }
         remaining -= chunk;
     }
     printf(" Done.\n");
@@ -297,7 +336,10 @@ int move_focus(const char *bus, unsigned char addr, int total_steps, int dir, in
     int remaining = total_steps;
     while (remaining > 0) {
         int chunk = (remaining > 3000) ? 3000 : remaining;
-        raw_step_focus_chunk(bus, addr, chunk, dir, pps);
+        if (raw_step_focus_chunk(bus, addr, chunk, dir, pps) < 0) {
+            printf(" Failed (I2C error).\n");
+            return -1;
+        }
         remaining -= chunk;
     }
     printf(" Done.\n");
@@ -341,20 +383,20 @@ int do_home(const char *bus, unsigned char addr, int pps) {
 
     printf("[1/4] Homing Zoom Axis to 0 (Full Wide mechanical hard-stop)...");
     fflush(stdout);
-    move_zoom(bus, addr, LENS_ZOOM_MAX_STEPS + 500, 0, pps);
+    if (move_zoom(bus, addr, LENS_ZOOM_MAX_STEPS + 500, 0, pps) < 0) return -1;
 
     printf("[2/4] Homing Focus Axis to 0 (Infinity mechanical hard-stop)...");
     fflush(stdout);
-    move_focus(bus, addr, LENS_FOCUS_MAX_STEPS + 500, 0, pps);
+    if (move_focus(bus, addr, LENS_FOCUS_MAX_STEPS + 500, 0, pps) < 0) return -1;
 
     printf("[3/4] Positioning Zoom to calibrated Wide optical angle (%d steps, %.1f mm)...", 
            LENS_ZOOM_HOME_POS, zoom_to_focal_mm(LENS_ZOOM_HOME_POS));
     fflush(stdout);
-    move_zoom(bus, addr, LENS_ZOOM_HOME_POS, 1, pps);
+    if (move_zoom(bus, addr, LENS_ZOOM_HOME_POS, 1, pps) < 0) return -1;
 
     printf("[4/4] Setting Focus to calibrated sharp focal plane (%d steps NEAR)...", LENS_FOCUS_HOME_POS);
     fflush(stdout);
-    move_focus(bus, addr, LENS_FOCUS_HOME_POS, 1, pps);
+    if (move_focus(bus, addr, LENS_FOCUS_HOME_POS, 1, pps) < 0) return -1;
 
     LensState st = {
         .zoom_pos = LENS_ZOOM_HOME_POS,
@@ -383,7 +425,9 @@ int move_zoom_tracked(const char *bus, unsigned char addr, int steps, int dir, i
         return 0;
     }
 
-    move_zoom(bus, addr, actual_steps, dir, pps);
+    if (move_zoom(bus, addr, actual_steps, dir, pps) < 0) {
+        return -1;
+    }
 
     st.zoom_pos = target;
     save_state(&st);
@@ -408,7 +452,9 @@ int move_focus_tracked(const char *bus, unsigned char addr, int steps, int dir, 
         return 0;
     }
 
-    move_focus(bus, addr, actual_steps, dir, pps);
+    if (move_focus(bus, addr, actual_steps, dir, pps) < 0) {
+        return -1;
+    }
 
     st.focus_pos = target;
     save_state(&st);
@@ -470,8 +516,7 @@ int set_focal_length_smooth(const char *bus, unsigned char addr, double focal_mm
     int total_z_delta = target_zoom - start_zoom;
     if (abs(total_z_delta) < 10) {
         // Just fine-tune focus
-        set_focus_absolute(bus, addr, target_focus, pps);
-        return 0;
+        return set_focus_absolute(bus, addr, target_focus, pps);
     }
 
     printf("=================================================================\n");
@@ -502,7 +547,10 @@ int set_focal_length_smooth(const char *bus, unsigned char addr, double focal_mm
         int f_dir = (df_seg > 0) ? 1 : 0;
 
         if (z_steps > 0 || f_steps > 0) {
-            raw_step_dual_sync(bus, addr, z_steps, z_dir, f_steps, f_dir, pps);
+            if (raw_step_dual_sync(bus, addr, z_steps, z_dir, f_steps, f_dir, pps) < 0) {
+                printf(" Failed (I2C error).\n");
+                return -1;
+            }
         }
 
         cur_z = next_z;
