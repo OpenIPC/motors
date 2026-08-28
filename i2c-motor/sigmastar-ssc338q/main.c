@@ -114,11 +114,15 @@ int i2c_write(int fd, unsigned char addr, unsigned char reg, unsigned char val) 
     return ioctl(fd, I2C_RDWR, &rdwr);
 }
 
+static inline int clamp_pps(int pps) {
+    if (pps < 32) return 32;
+    if (pps > 16383) return 16383;
+    return pps;
+}
+
 void set_channel_speeds(int fd, unsigned char addr, int pps_focus, int pps_zoom) {
-    if (pps_focus < 32) pps_focus = 32;
-    if (pps_focus > 16383) pps_focus = 16383;
-    if (pps_zoom < 32) pps_zoom = 32;
-    if (pps_zoom > 16383) pps_zoom = 16383;
+    pps_focus = clamp_pps(pps_focus);
+    pps_zoom = clamp_pps(pps_zoom);
 
     unsigned int div_f = 24000000 / pps_focus;
     unsigned int div_z = 24000000 / pps_zoom;
@@ -136,6 +140,7 @@ void set_channel_speeds(int fd, unsigned char addr, int pps_focus, int pps_zoom)
 int raw_step_zoom_chunk(const char *bus, unsigned char addr, int chunk_steps, int dir, int pps) {
     if (chunk_steps <= 0) return 0;
     if (chunk_steps > 3500) chunk_steps = 3500;
+    pps = clamp_pps(pps);
 
     int fd = open(bus, O_RDWR);
     if (fd < 0) return -1;
@@ -186,6 +191,7 @@ int raw_step_zoom_chunk(const char *bus, unsigned char addr, int chunk_steps, in
 int raw_step_focus_chunk(const char *bus, unsigned char addr, int chunk_steps, int dir, int pps) {
     if (chunk_steps <= 0) return 0;
     if (chunk_steps > 3500) chunk_steps = 3500;
+    pps = clamp_pps(pps);
 
     int fd = open(bus, O_RDWR);
     if (fd < 0) return -1;
@@ -238,6 +244,7 @@ int raw_step_dual_sync(const char *bus, unsigned char addr, int z_steps, int z_d
     if (z_steps <= 0 && f_steps <= 0) return 0;
     if (z_steps > 3500) z_steps = 3500;
     if (f_steps > 3500) f_steps = 3500;
+    base_pps = clamp_pps(base_pps);
 
     int fd = open(bus, O_RDWR);
     if (fd < 0) return -1;
@@ -252,8 +259,8 @@ int raw_step_dual_sync(const char *bus, unsigned char addr, int z_steps, int z_d
     int pps_z = base_pps;
     int pps_f = base_pps;
     if (max_steps > 0) {
-        if (z_steps > 0) pps_z = (base_pps * z_steps) / max_steps;
-        if (f_steps > 0) pps_f = (base_pps * f_steps) / max_steps;
+        if (z_steps > 0) pps_z = clamp_pps((base_pps * z_steps) / max_steps);
+        if (f_steps > 0) pps_f = clamp_pps((base_pps * f_steps) / max_steps);
     }
     set_channel_speeds(fd, addr, pps_f, pps_z);
 
@@ -599,7 +606,7 @@ int main(int argc, char **argv) {
             } else if (strcmp(argv[i], "-s") == 0 && i + 1 < argc) {
                 steps = atoi(argv[++i]);
             } else if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) {
-                pps = atoi(argv[++i]);
+                pps = clamp_pps(atoi(argv[++i]));
             } else if (strcmp(argv[i], "-b") == 0 && i + 1 < argc) {
                 bus = argv[++i];
             }
@@ -629,16 +636,16 @@ int main(int argc, char **argv) {
                 case 'u': {
                     int target_z = st.zoom_pos + steps;
                     if (target_z > LENS_ZOOM_MAX_STEPS) target_z = LENS_ZOOM_MAX_STEPS;
-                    return set_zoom_parfocal(bus, addr, target_z, pps);
+                    return (set_zoom_parfocal(bus, addr, target_z, pps) < 0) ? 1 : 0;
                 }
                 case 'd': {
                     int target_z = st.zoom_pos - steps;
                     if (target_z < LENS_ZOOM_HOME_POS) target_z = LENS_ZOOM_HOME_POS;
-                    return set_zoom_parfocal(bus, addr, target_z, pps);
+                    return (set_zoom_parfocal(bus, addr, target_z, pps) < 0) ? 1 : 0;
                 }
-                case 'r': return move_focus_tracked(bus, addr, steps, 1, pps); // Fine Focus Near
-                case 'l': return move_focus_tracked(bus, addr, steps, 0, pps); // Fine Focus Far
-                case 'i': return do_home(bus, addr, pps);                      // Init / Home
+                case 'r': return (move_focus_tracked(bus, addr, steps, 1, pps) < 0) ? 1 : 0; // Fine Focus Near
+                case 'l': return (move_focus_tracked(bus, addr, steps, 0, pps) < 0) ? 1 : 0; // Fine Focus Far
+                case 'i': return (do_home(bus, addr, pps) < 0) ? 1 : 0;                      // Init / Home
                 case 's': return 0; // Stop
                 default:
                     printf("Unknown direction: %c\n", direction);
@@ -652,24 +659,24 @@ int main(int argc, char **argv) {
         int h = atoi(argv[2]);
         int v = atoi(argv[3]);
         if (h == 0 && v == 0) {
-            return do_home(bus, addr, pps);
+            return (do_home(bus, addr, pps) < 0) ? 1 : 0;
         }
         if (v > 0) {
             LensState st;
             load_state(&st);
             int target_z = st.zoom_pos + abs(v) * 300;
             if (target_z > LENS_ZOOM_MAX_STEPS) target_z = LENS_ZOOM_MAX_STEPS;
-            return set_zoom_parfocal(bus, addr, target_z, pps); // Parfocal Zoom In
+            return (set_zoom_parfocal(bus, addr, target_z, pps) < 0) ? 1 : 0; // Parfocal Zoom In
         }
         if (v < 0) {
             LensState st;
             load_state(&st);
             int target_z = st.zoom_pos - abs(v) * 300;
             if (target_z < LENS_ZOOM_HOME_POS) target_z = LENS_ZOOM_HOME_POS;
-            return set_zoom_parfocal(bus, addr, target_z, pps); // Parfocal Zoom Out
+            return (set_zoom_parfocal(bus, addr, target_z, pps) < 0) ? 1 : 0; // Parfocal Zoom Out
         }
-        if (h > 0) return move_focus_tracked(bus, addr, abs(h) * 100, 1, pps); // Right: Fine Focus Near
-        if (h < 0) return move_focus_tracked(bus, addr, abs(h) * 100, 0, pps); // Left: Fine Focus Far
+        if (h > 0) return (move_focus_tracked(bus, addr, abs(h) * 100, 1, pps) < 0) ? 1 : 0; // Right: Fine Focus Near
+        if (h < 0) return (move_focus_tracked(bus, addr, abs(h) * 100, 0, pps) < 0) ? 1 : 0; // Left: Fine Focus Far
         return 0;
     }
 
@@ -705,12 +712,12 @@ int main(int argc, char **argv) {
     }
 
     if (argc >= 3) steps = atoi(argv[2]);
-    if (argc >= 4) pps = atoi(argv[3]);
+    if (argc >= 4) pps = clamp_pps(atoi(argv[3]));
     if (argc >= 5) bus = argv[4];
 
     const char *cmd = argv[1];
     if (strcmp(cmd, "home") == 0) {
-        do_home(bus, addr, pps);
+        return (do_home(bus, addr, pps) < 0) ? 1 : 0;
     } else if (strcmp(cmd, "status") == 0) {
         LensState st;
         load_state(&st);
@@ -727,19 +734,19 @@ int main(int argc, char **argv) {
             return 1;
         }
         double f_mm = atof(argv[2]);
-        set_focal_length_smooth(bus, addr, f_mm, pps);
+        return (set_focal_length_smooth(bus, addr, f_mm, pps) < 0) ? 1 : 0;
     } else if (strcmp(cmd, "zoomin") == 0) {
-        move_zoom_tracked(bus, addr, steps, 1, pps);
+        return (move_zoom_tracked(bus, addr, steps, 1, pps) < 0) ? 1 : 0;
     } else if (strcmp(cmd, "zoomout") == 0) {
-        move_zoom_tracked(bus, addr, steps, 0, pps);
+        return (move_zoom_tracked(bus, addr, steps, 0, pps) < 0) ? 1 : 0;
     } else if (strcmp(cmd, "focusin") == 0) {
-        move_focus_tracked(bus, addr, steps, 1, pps);
+        return (move_focus_tracked(bus, addr, steps, 1, pps) < 0) ? 1 : 0;
     } else if (strcmp(cmd, "focusout") == 0) {
-        move_focus_tracked(bus, addr, steps, 0, pps);
+        return (move_focus_tracked(bus, addr, steps, 0, pps) < 0) ? 1 : 0;
     } else if (strcmp(cmd, "setzoom") == 0) {
-        set_zoom_absolute(bus, addr, steps, pps);
+        return (set_zoom_absolute(bus, addr, steps, pps) < 0) ? 1 : 0;
     } else if (strcmp(cmd, "setfocus") == 0) {
-        set_focus_absolute(bus, addr, steps, pps);
+        return (set_focus_absolute(bus, addr, steps, pps) < 0) ? 1 : 0;
     } else if (strcmp(cmd, "reset") == 0) {
         LensState st = { .zoom_pos = 0, .focus_pos = 0, .is_calibrated = 0 };
         save_state(&st);
