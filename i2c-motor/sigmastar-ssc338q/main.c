@@ -374,11 +374,11 @@ int move_zoom_tracked(const char *bus, unsigned char addr, int steps, int dir, i
 
     int target = dir ? (st.zoom_pos + steps) : (st.zoom_pos - steps);
     if (target > LENS_ZOOM_MAX_STEPS) target = LENS_ZOOM_MAX_STEPS;
-    if (target < 0) target = 0;
+    if (target < LENS_ZOOM_HOME_POS) target = LENS_ZOOM_HOME_POS;
 
     int actual_steps = abs(target - st.zoom_pos);
     if (actual_steps == 0) {
-        printf("Zoom already at %s limit (%d / %d steps)\n", 
+        printf("Zoom already at %s optical limit (%d / %d steps)\n", 
                dir ? "TELE" : "WIDE", st.zoom_pos, LENS_ZOOM_MAX_STEPS);
         return 0;
     }
@@ -422,7 +422,7 @@ int set_zoom_absolute(const char *bus, unsigned char addr, int target_pos, int p
     load_state(&st);
 
     if (target_pos > LENS_ZOOM_MAX_STEPS) target_pos = LENS_ZOOM_MAX_STEPS;
-    if (target_pos < 0) target_pos = 0;
+    if (target_pos < LENS_ZOOM_HOME_POS) target_pos = LENS_ZOOM_HOME_POS;
 
     int delta = target_pos - st.zoom_pos;
     if (delta == 0) {
@@ -460,6 +460,8 @@ int set_focal_length_smooth(const char *bus, unsigned char addr, double focal_mm
     load_state(&st);
 
     int target_zoom = focal_mm_to_zoom(focal_mm);
+    if (target_zoom < LENS_ZOOM_HOME_POS) target_zoom = LENS_ZOOM_HOME_POS;
+    if (target_zoom > LENS_ZOOM_MAX_STEPS) target_zoom = LENS_ZOOM_MAX_STEPS;
     int target_focus = get_calibrated_focus(target_zoom);
 
     int start_zoom = st.zoom_pos;
@@ -478,42 +480,38 @@ int set_focal_length_smooth(const char *bus, unsigned char addr, double focal_mm
     printf("  Trajectory: Zoom %d -> %d | Focus %d -> %d\n",
            start_zoom, target_zoom, start_focus, target_focus);
     printf("=================================================================\n");
-
-    // Break trajectory into synchronized 100-step micro-chunks
-    int chunk_size = 100;
-    int steps_remaining = abs(total_z_delta);
-    int z_dir = (total_z_delta > 0) ? 1 : 0;
-
-    int current_z = start_zoom;
-    int current_f = start_focus;
-
     printf("Tracking along optical curve...");
     fflush(stdout);
 
-    while (steps_remaining > 0) {
-        int z_step = (steps_remaining > chunk_size) ? chunk_size : steps_remaining;
-        int next_z = z_dir ? (current_z + z_step) : (current_z - z_step);
-        int next_f = get_calibrated_focus(next_z);
+    int num_segments = 25;
+    double dz_seg = (double)total_z_delta / (double)num_segments;
+    double df_total = (double)(target_focus - start_focus);
+    double df_seg = df_total / (double)num_segments;
 
-        int f_step = abs(next_f - current_f);
-        int f_dir = (next_f > current_f) ? 1 : 0;
+    double cur_z = (double)start_zoom;
+    double cur_f = (double)start_focus;
 
-        raw_step_dual_sync(bus, addr, z_step, z_dir, f_step, f_dir, pps);
+    for (int i = 0; i < num_segments; i++) {
+        double next_z = cur_z + dz_seg;
+        double next_f = cur_f + df_seg;
 
-        current_z = next_z;
-        current_f = next_f;
-        steps_remaining -= z_step;
-    }
+        int z_steps = abs((int)round(next_z) - (int)round(cur_z));
+        int z_dir = (dz_seg > 0) ? 1 : 0;
 
-    // Final precision alignment
-    int final_f_delta = target_focus - current_f;
-    if (abs(final_f_delta) > 0) {
-        int f_dir = (final_f_delta > 0) ? 1 : 0;
-        raw_step_focus_chunk(bus, addr, abs(final_f_delta), f_dir, pps);
+        int f_steps = abs((int)round(next_f) - (int)round(cur_f));
+        int f_dir = (df_seg > 0) ? 1 : 0;
+
+        if (z_steps > 0 || f_steps > 0) {
+            raw_step_dual_sync(bus, addr, z_steps, z_dir, f_steps, f_dir, pps);
+        }
+
+        cur_z = next_z;
+        cur_f = next_f;
     }
 
     st.zoom_pos = target_zoom;
     st.focus_pos = target_focus;
+    st.is_calibrated = 1;
     save_state(&st);
 
     printf(" Done.\n");
@@ -523,6 +521,8 @@ int set_focal_length_smooth(const char *bus, unsigned char addr, double focal_mm
 }
 
 int set_zoom_parfocal(const char *bus, unsigned char addr, int target_zoom, int pps) {
+    if (target_zoom < LENS_ZOOM_HOME_POS) target_zoom = LENS_ZOOM_HOME_POS;
+    if (target_zoom > LENS_ZOOM_MAX_STEPS) target_zoom = LENS_ZOOM_MAX_STEPS;
     double focal_mm = zoom_to_focal_mm(target_zoom);
     return set_focal_length_smooth(bus, addr, focal_mm, pps);
 }
@@ -537,14 +537,15 @@ int main(int argc, char **argv) {
     int pps = DEFAULT_PPS;
     int steps = DEFAULT_STEPS;
 
-    // Check for OpenIPC standard -d, -s, -j flags: "motor -d [u|d|l|r|i] -s [speed/steps]" or "motor -j"
+    // Check for OpenIPC standard -d, -s, -j, -i flags
     if (argc >= 2 && argv[1][0] == '-') {
         char direction = 0;
         int json_output = 0;
-        int c;
         for (int i = 1; i < argc; i++) {
             if (strcmp(argv[i], "-j") == 0) {
                 json_output = 1;
+            } else if (strcmp(argv[i], "-i") == 0) {
+                json_output = 2;
             } else if (strcmp(argv[i], "-d") == 0 && i + 1 < argc) {
                 direction = argv[++i][0];
             } else if (strcmp(argv[i], "-s") == 0 && i + 1 < argc) {
@@ -560,13 +561,20 @@ int main(int argc, char **argv) {
             LensState st;
             load_state(&st);
             double f_mm = zoom_to_focal_mm(st.zoom_pos);
-            printf("{\"zoom\":%d,\"focus\":%d,\"focal_mm\":%.1f,\"zoom_max\":%d,\"focus_max\":%d,\"calibrated\":%d}\n",
-                   st.zoom_pos, st.focus_pos, f_mm, LENS_ZOOM_MAX_STEPS, LENS_FOCUS_MAX_STEPS, st.is_calibrated ? 1 : 0);
+            if (json_output == 2) {
+                printf("{\"status\":\"0\",\"xpos\":\"%d\",\"ypos\":\"%d\",\"xmax\":\"%d\",\"ymax\":\"%d\",\"speed\":\"%d\",\"zoom\":%d,\"focus\":%d,\"focal_mm\":%.1f,\"zoom_max\":%d,\"focus_max\":%d,\"calibrated\":%d}\n",
+                       st.focus_pos, st.zoom_pos, LENS_FOCUS_MAX_STEPS, LENS_ZOOM_MAX_STEPS, pps,
+                       st.zoom_pos, st.focus_pos, f_mm, LENS_ZOOM_MAX_STEPS, LENS_FOCUS_MAX_STEPS, st.is_calibrated ? 1 : 0);
+            } else {
+                printf("{\"status\":\"0\",\"xpos\":\"%d\",\"ypos\":\"%d\",\"speed\":\"%d\",\"zoom\":%d,\"focus\":%d,\"focal_mm\":%.1f,\"zoom_max\":%d,\"focus_max\":%d,\"calibrated\":%d}\n",
+                       st.focus_pos, st.zoom_pos, pps,
+                       st.zoom_pos, st.focus_pos, f_mm, LENS_ZOOM_MAX_STEPS, LENS_FOCUS_MAX_STEPS, st.is_calibrated ? 1 : 0);
+            }
             return 0;
         }
 
         if (direction) {
-            if (steps <= 0) steps = 120;
+            if (steps <= 0) steps = 300;
             LensState st;
             load_state(&st);
             switch (direction) {
@@ -577,7 +585,7 @@ int main(int argc, char **argv) {
                 }
                 case 'd': {
                     int target_z = st.zoom_pos - steps;
-                    if (target_z < 0) target_z = 0;
+                    if (target_z < LENS_ZOOM_HOME_POS) target_z = LENS_ZOOM_HOME_POS;
                     return set_zoom_parfocal(bus, addr, target_z, pps);
                 }
                 case 'r': return move_focus_tracked(bus, addr, steps, 1, pps); // Fine Focus Near
@@ -601,19 +609,19 @@ int main(int argc, char **argv) {
         if (v > 0) {
             LensState st;
             load_state(&st);
-            int target_z = st.zoom_pos + abs(v) * 120;
+            int target_z = st.zoom_pos + abs(v) * 300;
             if (target_z > LENS_ZOOM_MAX_STEPS) target_z = LENS_ZOOM_MAX_STEPS;
             return set_zoom_parfocal(bus, addr, target_z, pps); // Parfocal Zoom In
         }
         if (v < 0) {
             LensState st;
             load_state(&st);
-            int target_z = st.zoom_pos - abs(v) * 120;
-            if (target_z < 0) target_z = 0;
+            int target_z = st.zoom_pos - abs(v) * 300;
+            if (target_z < LENS_ZOOM_HOME_POS) target_z = LENS_ZOOM_HOME_POS;
             return set_zoom_parfocal(bus, addr, target_z, pps); // Parfocal Zoom Out
         }
-        if (h > 0) return move_focus_tracked(bus, addr, abs(h) * 80, 1, pps); // Right: Fine Focus Near
-        if (h < 0) return move_focus_tracked(bus, addr, abs(h) * 80, 0, pps); // Left: Fine Focus Far
+        if (h > 0) return move_focus_tracked(bus, addr, abs(h) * 100, 1, pps); // Right: Fine Focus Near
+        if (h < 0) return move_focus_tracked(bus, addr, abs(h) * 100, 0, pps); // Left: Fine Focus Far
         return 0;
     }
 
