@@ -142,7 +142,7 @@ int main(int argc, char *argv[]) {
         break;
       default:
         printf("Invalid Argument %c\n", c);
-        printf("Usage : %s\n");       
+        printf("Usage : %s\n", argv[0]);
         printf("\t -d tty device, default /dev/ttyAMA0\n\n");
         printf("Commands:\n+ - (Zoom) z x (Focus) h j k l (Pan Tilt) Space (Cancel)\n");
         return (-1);
