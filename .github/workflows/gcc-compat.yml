@@ -70,7 +70,7 @@ jobs:
           # stdio.h, and every build fails with a fatal missing-header error
           # that looks nothing like the dependency problem it actually is.
           apt-get install -y --no-install-recommends \
-            git ca-certificates \
+            bash git ca-certificates \
             gcc-arm-linux-gnueabihf libc6-dev-armhf-cross \
             gcc-mipsel-linux-gnu libc6-dev-mipsel-cross
 
@@ -78,6 +78,11 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Cross-compile every tool
+        # Pinned explicitly. These slim images ship no bash, so without this
+        # Actions falls back to `sh -e` -- different semantics from the bash
+        # this script was written and tested against, which is exactly how the
+        # first version of this workflow passed locally and failed in CI.
+        shell: bash -eo pipefail {0}
         run: |
           set -u
           # Targeted -Werror= rather than a blanket -Werror. These sources carry
@@ -101,8 +106,13 @@ jobs:
             if $cc $FLAGS -o "/tmp/$name" "$src" 2>/tmp/err.log; then
               echo "PASS  $name ($cc)"
               # Surface the legacy warnings without failing on them, so the
-              # noise stays visible and does not quietly grow.
-              [ -s /tmp/err.log ] && sed 's/^/      /' /tmp/err.log | head -20
+              # noise stays visible and does not quietly grow. A real `if`
+              # rather than `[ -s f ] && ...`: the latter evaluates false for a
+              # tool that compiles cleanly, and under `set -e` that ends the run.
+              # head before sed so the left side cannot take SIGPIPE under pipefail.
+              if [ -s /tmp/err.log ]; then
+                head -20 /tmp/err.log | sed 's/^/      /'
+              fi
             else
               echo "FAIL  $name ($cc)"
               sed 's/^/      /' /tmp/err.log
