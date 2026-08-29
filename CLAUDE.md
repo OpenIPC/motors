@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repository is
 
-A collection of **independent, single-file C command-line tools** that drive camera motors (pan/tilt, zoom, focus, iris) on ARM IP-camera SoCs — Xiongmai, HiSilicon, Ingenic T31. There is no shared library, no top-level build, and no test suite. Each directory is a self-contained program targeting one specific hardware/driver combination, and `api/` is a design document for a future daemon that would unify them.
+A collection of **independent, single-file C command-line tools** that drive camera motors (pan/tilt, zoom, focus, iris) on IP-camera SoCs — Xiongmai, HiSilicon, Ingenic T31. There is no shared library and no top-level build. Each directory is a self-contained program targeting one specific hardware/driver combination, and `api/` is a design document for a future daemon that would unify them.
+
+There are no tests — the code only does anything when talking to real motor hardware. The one automated check is `.github/workflows/gcc-compat.yml`, which cross-compiles every tool on GCC 12 and GCC 14 and is a **required status check** (`GCC Gate`) on `master`. It is a compile gate, not a test suite: it proves the tree still builds, nothing about whether a motor moves.
 
 Because every tool talks to different vendor hardware, **the tools cannot be built or run on the development host** — they are cross-compiled for ARM and executed on a camera over SSH.
 
