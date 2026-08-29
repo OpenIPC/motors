@@ -6,7 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A collection of **independent, single-file C command-line tools** that drive camera motors (pan/tilt, zoom, focus, iris) on IP-camera SoCs — Xiongmai, HiSilicon, Ingenic T31. There is no shared library and no top-level build. Each directory is a self-contained program targeting one specific hardware/driver combination, and `api/` is a design document for a future daemon that would unify them.
 
-There are no tests — the code only does anything when talking to real motor hardware. The one automated check is `.github/workflows/gcc-compat.yml`, which cross-compiles every tool on GCC 12 and GCC 14 and is a **required status check** (`GCC Gate`) on `master`. It is a compile gate, not a test suite: it proves the tree still builds, nothing about whether a motor moves.
+There are no tests — the code only does anything when talking to real motor hardware. The one automated check is `.github/workflows/gcc-compat.yml`, a **required status check** (`GCC Gate`) on `master`. Know precisely what it does and does not cover:
+
+- It cross-compiles **five of the six tools** on GCC 12 and GCC 14. **`an41908a` is excluded**, because it needs the proprietary Hi3516CV500 MPP SDK — so changes under `an41908a/` get no CI coverage whatsoever and must be built by hand. A green gate says nothing about them.
+- It is a *compiler* gate, not a *toolchain* gate. It uses Debian's glibc cross-compilers (`arm-linux-gnueabihf`, `mipsel-linux-gnu`), not the musl OpenIPC or vendor toolchains these tools actually ship against. That is deliberate: the defects it exists to catch — implicit declarations, format bugs, int conversions — are language-level and libc-independent, whereas the real toolchains are 100 MB–3.7 GB downloads and the vendor ones are GCC 4.4–6.3, too old to catch what a modern compiler rejects. The gap it leaves is a musl-only build break (a header difference between musl and glibc) passing CI and failing on the real toolchain.
+- It proves the tree still compiles. It does not produce a deployable binary, and it says nothing about whether a motor moves.
 
 Because every tool talks to different vendor hardware, **the tools cannot be built or run on the development host** — they are cross-compiled for ARM and executed on a camera over SSH.
 

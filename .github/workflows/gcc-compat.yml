@@ -10,6 +10,17 @@
 #
 # This is a REQUIRED check, via the GCC Gate job at the bottom.
 #
+# What a green run does NOT mean, so nobody reads more into it than it says:
+#   - an41908a is never built here (proprietary MPP SDK), so changes under
+#     an41908a/ get no coverage at all from this gate.
+#   - These are Debian glibc cross-compilers, not the musl OpenIPC or vendor
+#     toolchains the tools ship against. That is deliberate -- the diagnostics
+#     promoted below are language-level and libc-independent, while the real
+#     toolchains are 100 MB-3.7 GB downloads and the vendor ones are GCC
+#     4.4-6.3, far too old to catch what a modern compiler rejects. The gap
+#     this leaves is a musl-only break passing here and failing on target.
+#   - Nothing is executed. This gate compiles; it does not test.
+#
 # There is deliberately no `paths:` filter on the trigger. A workflow filtered
 # out by `paths:` does not run at all, so a required check from it would sit
 # pending forever and the pull request could never be merged. The whole repo is
