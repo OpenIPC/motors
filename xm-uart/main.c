@@ -57,12 +57,18 @@ static void send_cmd(int fd, int panSpeed, int tiltSpeed, int zoomSpeed) {
 
 static void set_focus(int fd, bool near) {
   uint8_t command1 = 0, command2 = 0, data1 = 0, data2 = 0, checkSum = 0;
-  checkSum = (addressPTZ + command1 + command2 + data1 + data2) % 100;
 
   if (near)
     command1 = 1;
   else
     command2 = 0x80;
+
+  /* Over the bytes actually sent, AFTER the near/far bit is set. Computed
+   * before it, every focus frame carried checkSum 1, and an MCU that
+   * validates the sum (the 85H50AI zoom block does) silently discarded
+   * them — zoom moved, focus never did. near => 2, far => 29; a
+   * non-validating MCU accepts either form. */
+  checkSum = (addressPTZ + command1 + command2 + data1 + data2) % 100;
 
   uint8_t bstr[] = {SYNC,  addressPTZ, command1, command2,
                     data1, data2,      checkSum, 0x5c};
