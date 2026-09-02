@@ -81,7 +81,7 @@ jobs:
           # stdio.h, and every build fails with a fatal missing-header error
           # that looks nothing like the dependency problem it actually is.
           apt-get install -y --no-install-recommends \
-            bash git ca-certificates \
+            bash git ca-certificates gcc make libncurses-dev \
             gcc-arm-linux-gnueabihf libc6-dev-armhf-cross \
             gcc-mipsel-linux-gnu libc6-dev-mipsel-cross
 
@@ -140,6 +140,17 @@ jobs:
           # ingenic-motor targets the Ingenic T31, which is MIPS little-endian,
           # NOT ARM. Its OpenIPC toolchain is mipsel-openipc-linux-musl-.
           build mipsel-linux-gnu-gcc ingenic-motor ingenic-motor/main.c
+
+          # pelcodtui has host-runnable protocol, profile, state, and PTY tests.
+          # Its deployment target is ARM, but these checks exercise the same C
+          # sources without requiring camera hardware or the OpenIPC sysroot.
+          if make -C pelcodtui test; then
+            echo "PASS  pelcodtui (native tests)"
+          else
+            echo "FAIL  pelcodtui (native tests)"
+            echo "::error::pelcodtui failed to build or test"
+            rc=1
+          fi
 
           # an41908a is deliberately absent. It needs the proprietary HiSilicon
           # Hi3516CV500 MPP SDK for hi_type.h/mpi_isp.h and the -lmpi -lisp link
