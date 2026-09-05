@@ -2,6 +2,12 @@
 
 Various code to manage motor hardware
 
+## Pelco-D configuration TUI
+
+[`pelcodtui`](pelcodtui/) is an ncurses interface for Pelco-D PTZ controller
+settings and manual movement. Camera profiles describe controller-specific
+commands without hard-coding them in the application.
+
 ## Some theory behind
 
 [Basic autofocus algorithms](https://www.csie.ntu.edu.tw/~fuh/personal/Images&Recognition.Vol.9,No.4.Autofocus.pdf)
