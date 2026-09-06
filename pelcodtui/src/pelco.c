@@ -1,4 +1,5 @@
 #include "pelcodtui.h"
+#include "libmotors.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -13,6 +14,61 @@
 
 #define PCT_LOCK_DIR "/tmp/btzoom.lock"
 #define PCT_STALE_LOCK_SECONDS 60
+
+static int service_axis(const char *verb, enum motors_client_axis *axis,
+                        enum motors_direction *direction) {
+  if (!strcmp(verb, "left")) { *axis = MOTORS_PAN; *direction = MOTORS_LEFT; }
+  else if (!strcmp(verb, "right")) { *axis = MOTORS_PAN; *direction = MOTORS_RIGHT; }
+  else if (!strcmp(verb, "up")) { *axis = MOTORS_TILT; *direction = MOTORS_UP; }
+  else if (!strcmp(verb, "down")) { *axis = MOTORS_TILT; *direction = MOTORS_DOWN; }
+  else if (!strcmp(verb, "tele")) { *axis = MOTORS_ZOOM; *direction = MOTORS_TELE; }
+  else if (!strcmp(verb, "wide")) { *axis = MOTORS_ZOOM; *direction = MOTORS_WIDE; }
+  else if (!strcmp(verb, "near")) { *axis = MOTORS_FOCUS; *direction = MOTORS_NEAR; }
+  else if (!strcmp(verb, "far")) { *axis = MOTORS_FOCUS; *direction = MOTORS_FAR; }
+  else return -1;
+  return 0;
+}
+
+int pct_named_command(const struct pct_transport *transport, const char *name,
+                      const char *value, char *summary, size_t n) {
+  if (!transport->use_motorsd) {
+    snprintf(summary, n, "named command needs motorsd");
+    return -1;
+  }
+  if (transport->dry_run) {
+    snprintf(summary, n, "%s=%s (dry run)", name, value ? value : "action");
+    return 0;
+  }
+  struct motors_client *client = NULL;
+  char error[160] = "";
+  char wire_name[128];
+  size_t i = 0;
+  for (; name[i] && i + 1 < sizeof(wire_name); i++)
+    wire_name[i] = name[i] == '_' ? '.' : name[i];
+  wire_name[i] = '\0';
+  if (motors_open(&client, transport->socket_path, error, sizeof(error)) != 0 ||
+      motors_command(client, wire_name, value, error, sizeof(error)) != 0) {
+    snprintf(summary, n, "motorsd: %s", error[0] ? error : "command failed");
+    motors_close(client);
+    return -1;
+  }
+  motors_close(client);
+  snprintf(summary, n, "sent %s", name);
+  return 0;
+}
+
+int pct_preset(const struct pct_transport *transport, const char *operation,
+               unsigned preset, char *summary, size_t n) {
+  if (transport->use_motorsd) {
+    char name[32], value[4];
+    snprintf(name, sizeof(name), "preset.%s", operation);
+    snprintf(value, sizeof(value), "%u", preset);
+    return pct_named_command(transport, name, value, summary, n);
+  }
+  char command[64];
+  snprintf(command, sizeof(command), "preset_%s %u", operation, preset);
+  return pct_execute(transport, command, summary, n);
+}
 
 void pct_sleep_ms(unsigned ms) {
   struct timespec delay = {ms / 1000, (long)(ms % 1000) * 1000000L};
@@ -288,6 +344,27 @@ int pct_motion_start(struct pct_motion *motion,
     snprintf(summary, n, "motion already active");
     return -1;
   }
+  if (transport->use_motorsd && !transport->dry_run) {
+    enum motors_client_axis axis;
+    enum motors_direction direction;
+    char error[160] = "";
+    struct motors_client *client = NULL;
+    if (service_axis(verb, &axis, &direction) != 0 ||
+        motors_open(&client, transport->socket_path, error, sizeof(error)) != 0 ||
+        motors_acquire(client, MOTORS_MANUAL, axis, 6000, error,
+                       sizeof(error)) != 0 ||
+        motors_move(client, axis, direction, 0, error, sizeof(error)) != 0) {
+      snprintf(summary, n, "motorsd: %s", error[0] ? error : "invalid movement");
+      motors_close(client);
+      return -1;
+    }
+    motion->transport = transport;
+    motion->service_client = client;
+    motion->service_axis = (unsigned)axis;
+    motion->active = true;
+    snprintf(summary, n, "%s active", verb);
+    return 0;
+  }
   if (!transport->dry_run && lock_port()) {
     snprintf(summary, n, "PTZ port busy");
     return -1;
@@ -323,6 +400,21 @@ int pct_motion_stop(struct pct_motion *motion, char *summary, size_t n) {
     return 0;
 
   const struct pct_transport *transport = motion->transport;
+  if (transport->use_motorsd && !transport->dry_run) {
+    struct motors_client *client = motion->service_client;
+    char error[160] = "";
+    int result = motors_stop(client,
+        (enum motors_client_axis)motion->service_axis, error, sizeof(error));
+    if (result == 0)
+      (void)motors_release(client, error, sizeof(error));
+    motors_close(client);
+    motion->service_client = NULL;
+    motion->active = false;
+    motion->transport = NULL;
+    snprintf(summary, n, "%s", result == 0 ? "stopped" :
+             (error[0] ? error : "motorsd stop failed"));
+    return result;
+  }
   uint8_t frame_bytes[7];
   unsigned sent = 0;
   char last_error[128] = "UART STOP failed";
@@ -366,6 +458,19 @@ int pct_motion_stop(struct pct_motion *motion, char *summary, size_t n) {
 
 int pct_move(const struct pct_transport *transport, const char *verb,
              unsigned speed, unsigned duration, char *summary, size_t n) {
+  if (!strcmp(verb, "stop") && transport->use_motorsd && !transport->dry_run) {
+    struct motors_client *client = NULL;
+    char error[160] = "";
+    if (motors_open(&client, transport->socket_path, error, sizeof(error)) != 0 ||
+        motors_stop_all(client, error, sizeof(error)) != 0) {
+      snprintf(summary, n, "motorsd: %s", error[0] ? error : "stop failed");
+      motors_close(client);
+      return -1;
+    }
+    motors_close(client);
+    snprintf(summary, n, "stopped");
+    return 0;
+  }
   if (!strcmp(verb, "stop"))
     return pct_execute(transport, "stop", summary, n);
 

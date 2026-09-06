@@ -35,6 +35,27 @@ static void set_entry(struct pct_profile *p, const char *section,
   assert(0 && "profile entry not found");
 }
 
+static void description_test(void) {
+  static const char json[] =
+      "{\"version\":1,\"id\":\"d\",\"ok\":true,"
+      "\"profile\":\"test-camera\",\"label\":\"Test camera\","
+      "\"dangerous_call\":\"100\","
+      "\"menus\":[{\"id\":\"accessories\",\"label\":\"Accessories\","
+      "\"items\":[\"ir_brightness\"]}],"
+      "\"controls\":[{\"id\":\"ir_brightness\","
+      "\"name\":\"ir.brightness\",\"type\":\"number\","
+      "\"label\":\"IR brightness\",\"description\":\"Set brightness.\","
+      "\"min\":1,\"max\":10,\"default\":\"8\"}]}";
+  struct pct_profile profile;
+  char error[160] = "";
+  assert(!pct_profile_from_description(&profile, json, error, sizeof(error)));
+  assert(!strcmp(pct_get(&profile, "profile", "id"), "test-camera"));
+  assert(!strcmp(pct_get(&profile, "profile", "dangerous_call"), "100"));
+  assert(!strcmp(pct_get(&profile, "menu.accessories", "items"),
+                 "ir_brightness"));
+  assert(!strcmp(pct_get(&profile, "setting.ir_brightness", "max"), "10"));
+}
+
 static void frame_tests(void) {
   uint8_t f[7];
   const uint8_t set[] = {0xff, 1, 0, 3, 0, 121, 125};
@@ -379,6 +400,7 @@ int main(int argc, char **argv) {
   validation_test(&p);
   repeated_value_test(&p);
   all_profile_commands_test(&p);
+  description_test();
   frame_tests();
   uart_sequence_test();
   command_rejection_test();

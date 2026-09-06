@@ -358,8 +358,12 @@ static void apply_item(struct pct_ui_context *ui, const struct pct_profile *p,
       return;
     }
   }
-  if (pct_execute(t, cmd, ui->message, sizeof(ui->message)))
-    return;
+  if (t->use_motorsd) {
+    if (pct_named_command(t, i->id, i->action ? NULL : value,
+                          ui->message, sizeof(ui->message)))
+      return;
+  } else if (pct_execute(t, cmd, ui->message, sizeof(ui->message)))
+      return;
   if (t->dry_run)
     return;
   mkdir("/etc/pelcodtui", 0755);
@@ -578,7 +582,6 @@ int pct_ui_preset_menu(struct pct_ui_context *ui,
         snprintf(ui->message, sizeof(ui->message), "Preset must be 1..255");
         continue;
       }
-      char cmd[64];
       const char *dangerous = p ? pct_get(p, "profile",
           !strcmp(action, "Set") ? "dangerous_set" : "dangerous_call") : NULL;
       char preset_text[4];
@@ -586,9 +589,8 @@ int pct_ui_preset_menu(struct pct_ui_context *ui,
       if (pct_csv_has(dangerous, preset_text) &&
           !confirm_dialog(ui, "This preset command can reset or delete controller state."))
         continue;
-      snprintf(cmd, sizeof(cmd), "preset_%s %d",
-               !strcmp(action, "Set") ? "set" : "call", preset);
-      pct_execute(t, cmd, ui->message, sizeof(ui->message));
+      pct_preset(t, !strcmp(action, "Set") ? "set" : "call",
+                 (unsigned)preset, ui->message, sizeof(ui->message));
     }
   }
 }

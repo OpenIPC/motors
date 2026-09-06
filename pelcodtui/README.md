@@ -1,8 +1,8 @@
 # pelcodtui
 
-`pelcodtui` is a standalone ncurses interface for Pelco-D camera controllers.
-It sends UART commands directly and uses camera templates to describe autonomous
-controller settings.
+`pelcodtui` is a standalone ncurses client for Pelco-D camera controllers.
+By default, it connects to `motorsd`. The selected driver owns the UART and
+describes the controller settings.
 
 Pelco-D does not return these settings. The TUI therefore shows the last command
 sent and its timestamp. It never presents saved values as confirmed camera state.
@@ -14,18 +14,18 @@ sent and its timestamp. It never presents saved values as confirmed camera state
 
 ```sh
 make test
-./build/pelcodtui --dry-run --profiles-dir ./cameras --state /tmp/pelcodtui-state.conf
+./build/pelcodtui --socket /run/motorsd.sock
 ```
 
-Camera commands in `--dry-run` mode do not use the hardware lock or update
-command history.
+Use `--direct` only for legacy testing without `motorsd`. In that mode, select a
+local profile or pass `--profile FILE`. Add `--dry-run` to inspect direct
+commands without writing to the UART.
 
 Install on a camera with `make DESTDIR=/path/to/rootfs install`. The default
 connection for the bundled P35 HiEasy, H07 HiEasy, and legacy P6SLite profiles
 is `/dev/ttyAMA0`, 115200 baud, address 1.
-The program shares `/tmp/btzoom.lock` with the OpenIPC WebUI and keeps the lock
-directory empty for compatibility with `btzoom`. An empty lock older than 60
-seconds is treated as stale and may be recovered.
+Only direct mode uses the legacy `/tmp/btzoom.lock`. Normal use does not open the
+UART and does not use this lock.
 
 Build and deploy over SSH:
 
@@ -42,8 +42,8 @@ The camera deploy bundles ncurses and its terminal definitions under
 the cross-compiler sysroot reported by `CAMERA_CC -print-sysroot`.
 SSH host-key checks remain enabled. Set `CAMERA_INSECURE_SSH=1` only for a
 camera whose host key you cannot store or check.
-Deployment replaces the binary and installs all shipped templates, but preserves
-`/etc/pelcodtui/state.conf`.
+Deployment replaces the binary and installs the templates for direct mode. It
+preserves `/etc/pelcodtui/state.conf`.
 
 The profile comments identify the source manuals and note conflicting ranges.
 The PDF archive used to prepare them is local reference material and is not
@@ -58,6 +58,7 @@ Z/X controls zoom, N/F controls focus, Space sends STOP, and Q exits.
 Factory reset, preset deletion, and pan/tilt correction require confirmation.
 Raw preset control also confirms documented destructive commands in known
 camera profiles. Unknown-camera mode keeps unrestricted preset access.
-Movement commands are timed and finish with three STOP frames at 10 ms spacing.
+In normal mode, the selected driver controls movement timing and hardware
+delivery. Direct mode uses the delivery rules from its local profile.
 Press the same movement key again before it stops to add another pulse, up to
 five seconds total.

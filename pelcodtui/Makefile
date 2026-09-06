@@ -1,11 +1,11 @@
 CC ?= cc
 CFLAGS ?= -O2 -Wall -Wextra -Werror
-CPPFLAGS += -D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L -Isrc
+CPPFLAGS += -D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L -Isrc -I../motorsd/include
 NCURSES_LIBS ?= -lncurses
 PREFIX ?= /usr
 SYSCONFDIR ?= /etc
 BUILD := build
-CORE := $(BUILD)/profile.o $(BUILD)/pelco.o $(BUILD)/state.o
+CORE := $(BUILD)/profile.o $(BUILD)/pelco.o $(BUILD)/state.o $(BUILD)/libmotors.o
 UI := $(BUILD)/tui.o $(BUILD)/tui_menus.o
 CAMERA_BUILD := build-camera
 SIBLING_CAMERA_CC := ../../firmware/output/host/bin/arm-openipc-linux-musleabi-gcc
@@ -22,13 +22,16 @@ $(BUILD):
 $(BUILD)/%.o: src/%.c src/pelcodtui.h | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
+$(BUILD)/libmotors.o: ../motorsd/src/libmotors.c ../motorsd/include/libmotors.h | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
 $(BUILD)/main.o $(UI): src/tui_internal.h
 
 $(BUILD)/pelcodtui: $(BUILD)/main.o $(UI) $(CORE)
-	$(CC) $(LDFLAGS) $^ $(NCURSES_LIBS) -o $@
+	$(CC) $(LDFLAGS) $^ $(NCURSES_LIBS) -ljson-c -o $@
 
 $(BUILD)/test_core: tests/test_core.c $(CORE)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $^ -lutil -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $^ -lutil -ljson-c -o $@
 
 test: $(BUILD)/pelcodtui $(BUILD)/test_core
 	@for profile in cameras/*.conf; do \

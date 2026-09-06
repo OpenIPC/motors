@@ -2,6 +2,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <json-c/json.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,6 +22,122 @@ static int add(struct pct_profile *p, const char *sec, const char *key, const ch
     snprintf(p->entries[p->count].value, PCT_TEXT, "%s", val);
     p->count++;
     return 0;
+}
+
+static int add_section(struct pct_profile *p, const char *section) {
+    size_t length = strlen(section);
+    if (length >= sizeof(p->sections[0])) return -1;
+    for (size_t i = 0; i < p->section_count; ++i)
+        if (!strcmp(p->sections[i], section)) return 0;
+    if (p->section_count >= PCT_MAX_SECTIONS) return -1;
+    memcpy(p->sections[p->section_count], section, length + 1);
+    p->section_count++;
+    return 0;
+}
+
+static int add_json_string(struct pct_profile *p, const char *section,
+                           struct json_object *object, const char *key) {
+    struct json_object *value = NULL;
+    if (!json_object_object_get_ex(object, key, &value)) return 0;
+    return add(p, section, key, json_object_get_string(value));
+}
+
+static int add_json_array(struct pct_profile *p, const char *section,
+                          struct json_object *object, const char *key,
+                          const char *value_key) {
+    struct json_object *array = NULL;
+    if (!json_object_object_get_ex(object, key, &array) ||
+        !json_object_is_type(array, json_type_array)) return 0;
+    char joined[PCT_TEXT] = "";
+    size_t used = 0;
+    for (size_t i = 0; i < json_object_array_length(array); ++i) {
+        struct json_object *item = json_object_array_get_idx(array, i);
+        struct json_object *value = item;
+        if (value_key && (!json_object_object_get_ex(item, value_key, &value)))
+            return -1;
+        const char *text = json_object_get_string(value);
+        int written = snprintf(joined + used, sizeof(joined) - used, "%s%s",
+                               used ? "," : "", text ? text : "");
+        if (written < 0 || (size_t)written >= sizeof(joined) - used) return -1;
+        used += (size_t)written;
+    }
+    return add(p, section, key, joined);
+}
+
+int pct_profile_from_description(struct pct_profile *p, const char *json,
+                                 char *err, size_t n) {
+    memset(p, 0, sizeof(*p));
+    struct json_object *root = json_tokener_parse(json);
+    struct json_object *ok = NULL, *profile = NULL, *label = NULL;
+    struct json_object *menus = NULL, *controls = NULL;
+    if (!root || !json_object_is_type(root, json_type_object) ||
+        !json_object_object_get_ex(root, "ok", &ok) ||
+        !json_object_get_boolean(ok) ||
+        !json_object_object_get_ex(root, "profile", &profile) ||
+        !json_object_object_get_ex(root, "label", &label) ||
+        !json_object_object_get_ex(root, "menus", &menus) ||
+        !json_object_is_type(menus, json_type_array) ||
+        !json_object_object_get_ex(root, "controls", &controls) ||
+        !json_object_is_type(controls, json_type_array)) {
+        snprintf(err, n, "invalid driver description");
+        if (root) json_object_put(root);
+        return -1;
+    }
+    add_section(p, "profile");
+    if (add(p, "profile", "schema_version", "1") ||
+        add(p, "profile", "id", json_object_get_string(profile)) ||
+        add(p, "profile", "name", json_object_get_string(label)) ||
+        add_json_string(p, "profile", root, "description") ||
+        add_json_string(p, "profile", root, "dangerous_call") ||
+        add_json_string(p, "profile", root, "dangerous_set")) goto too_large;
+
+    for (size_t i = 0; i < json_object_array_length(menus); ++i) {
+        struct json_object *menu = json_object_array_get_idx(menus, i), *id = NULL;
+        char section[128];
+        if (!json_object_object_get_ex(menu, "id", &id)) goto invalid;
+        snprintf(section, sizeof(section), "menu.%s", json_object_get_string(id));
+        if (add_section(p, section) || add_json_string(p, section, menu, "label") ||
+            add_json_array(p, section, menu, "items", NULL)) goto too_large;
+    }
+    for (size_t i = 0; i < json_object_array_length(controls); ++i) {
+        struct json_object *control = json_object_array_get_idx(controls, i);
+        struct json_object *id = NULL, *type = NULL;
+        if (!json_object_object_get_ex(control, "id", &id) ||
+            !json_object_object_get_ex(control, "type", &type)) goto invalid;
+        bool action = !strcmp(json_object_get_string(type), "action");
+        char section[128];
+        snprintf(section, sizeof(section), "%s.%s", action ? "action" : "setting",
+                 json_object_get_string(id));
+        if (add_section(p, section)) goto too_large;
+        const char *keys[] = {"type", "label", "description", "default", "unit",
+                              "warning", "min", "max", "step", "confirm"};
+        for (size_t k = 0; k < sizeof(keys) / sizeof(keys[0]); ++k)
+            if ((!action || strcmp(keys[k], "type")) &&
+                add_json_string(p, section, control, keys[k])) goto too_large;
+        struct json_object *options = NULL;
+        if (json_object_object_get_ex(control, "options", &options)) {
+            if (add_json_array(p, section, control, "options", "value")) goto too_large;
+            for (size_t j = 0; j < json_object_array_length(options); ++j) {
+                struct json_object *option = json_object_array_get_idx(options, j);
+                struct json_object *value = NULL, *option_label = NULL;
+                if (!json_object_object_get_ex(option, "value", &value)) goto invalid;
+                char key[192];
+                snprintf(key, sizeof(key), "option.%s.label", json_object_get_string(value));
+                if (json_object_object_get_ex(option, "label", &option_label) &&
+                    add(p, section, key, json_object_get_string(option_label))) goto too_large;
+            }
+        }
+    }
+    json_object_put(root);
+    return 0;
+too_large:
+    snprintf(err, n, "driver description is too large");
+    json_object_put(root);
+    return -1;
+invalid:
+    snprintf(err, n, "invalid driver description");
+    json_object_put(root);
+    return -1;
 }
 
 const char *pct_get(const struct pct_profile *p, const char *section, const char *key) {
