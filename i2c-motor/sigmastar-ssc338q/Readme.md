@@ -34,17 +34,14 @@ make CC=arm-linux-gnueabihf-gcc
 
 To enable the on-screen PTZ overlay controls on the live video stream in OpenIPC Web UI:
 
-1. **Enable PTZ in U-Boot environment**:
+1. Enable PTZ in the U-Boot environment:
    ```sh
    fw_setenv ptz 1
    ```
-2. **Binary Location**:
-   The binary is expected at `/usr/bin/motor` (standard target path when packaged via OpenIPC Buildroot):
+2. Ensure the binary is installed at `/usr/bin/motor`:
    ```sh
-   # When deploying to a running camera:
-   scp motor root@<camera-ip>:/tmp/motor
-   chmod +x /tmp/motor
-   # (Or build directly into rootfs at /usr/bin/motor)
+   cp motor /usr/bin/motor
+   chmod +x /usr/bin/motor
    ```
 3. Open the camera Web UI in your browser (`http://<camera-ip>`). The live stream preview will now display interactive on-screen controls:
    - **Up / Down**: Smooth simultaneous parfocal optical zoom (IN / OUT).
