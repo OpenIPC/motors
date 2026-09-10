@@ -23,8 +23,8 @@
 #
 # There is deliberately no `paths:` filter on the trigger. A workflow filtered
 # out by `paths:` does not run at all, so a required check from it would sit
-# pending forever and the pull request could never be merged. The whole repo is
-# five C files and a build takes under a minute, so there is nothing to narrow.
+# The whole repo is six C tools and a build takes under a minute, so there is
+# nothing to narrow.
 name: gcc-compat
 
 on:
@@ -113,8 +113,8 @@ jobs:
 
           rc=0
           build() {
-            cc=$1; name=$2; src=$3
-            if $cc $FLAGS -o "/tmp/$name" "$src" 2>/tmp/err.log; then
+            cc=$1; name=$2; src=$3; shift 3
+            if $cc $FLAGS -o "/tmp/$name" "$src" "$@" 2>/tmp/err.log; then
               echo "PASS  $name ($cc)"
               # Surface the legacy warnings without failing on them, so the
               # noise stays visible and does not quietly grow. A real `if`
@@ -132,10 +132,11 @@ jobs:
             fi
           }
 
-          # ARM targets: Xiongmai and HiSilicon SoCs.
+          # ARM targets: Xiongmai, HiSilicon, and SigmaStar SoCs.
           for t in xm-kmotor xm-uart camhi-motor i2c-motor; do
             build arm-linux-gnueabihf-gcc "$t" "$t/main.c"
           done
+          build arm-linux-gnueabihf-gcc i2c-motor-sigmastar i2c-motor/sigmastar-ssc338q/main.c -lm
 
           # ingenic-motor targets the Ingenic T31, which is MIPS little-endian,
           # NOT ARM. Its OpenIPC toolchain is mipsel-openipc-linux-musl-.
