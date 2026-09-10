@@ -1,13 +1,14 @@
 CC ?= $(CROSS_COMPILE)gcc
 CFLAGS ?= -O2 -Wall
-LDFLAGS ?= -lm
+LDFLAGS ?=
+LDLIBS ?= -lm
 
 TARGET = motor
 
 all: $(TARGET)
 
 $(TARGET): main.o
-	$(CC) -o $@ $^ $(LDFLAGS)
+	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
