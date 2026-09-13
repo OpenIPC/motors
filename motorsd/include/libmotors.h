@@ -72,6 +72,9 @@ int motors_poll(struct motors_client *client, int timeout_ms,
                 char *error, size_t error_size);
 bool motors_lease_revoked(const struct motors_client *client,
                           enum motors_client_axis axis);
+bool motors_zoom_magnification(const struct motors_client *client,
+                               float *magnification,
+                               uint64_t *observed_mono_ms);
 int motors_wait_movement(struct motors_client *client,
                          enum motors_client_axis axis, int timeout_ms,
                          uint64_t *completed_mono_ms,

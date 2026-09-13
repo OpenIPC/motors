@@ -1,40 +1,40 @@
 # motorsd prototype
 
-`motorsd` gives all motor clients one service and one ownership model. It
-starts one persistent driver process. Only that driver opens the hardware.
+`motorsd` gives motor clients one service and one ownership model. It starts one
+persistent driver process. Only that driver opens the hardware.
 
-Clients use one of these interfaces:
+Clients can use:
 
-- `libmotors` provides C functions.
-- `motorsctl` sends socket requests from a shell.
-- Other clients can use the [socket protocol](PROTOCOL.md) directly.
+- `libmotors`, the C API
+- `motorsctl`, the command-line client
+- the [public socket protocol](PROTOCOL.md)
 
-The [driver protocol](DRIVER_PROTOCOL.md) defines the private connection between
-`motorsd` and a driver. The [prototype roadmap](TODO.md) records the remaining
-work and hardware validation.
+The socket protocol is the service API. `libmotors` and `motorsctl` contain no
+hardware protocol or motor policy.
 
-The socket protocol is the public API. `libmotors` and `motorsctl` contain no
-motor protocol or hardware logic.
+The [driver protocol](DRIVER_PROTOCOL.md) connects `motorsd` to the selected
+driver. The driver owns transport access, precise movement timing, and hardware
+delivery rules.
 
 ## Build and test
 
-Install a C compiler, `make`, `pkg-config`, and the development files for
-`json-c`. Then run:
+Install a C compiler, `make`, `pkg-config`, and the `json-c` development files.
+Then run:
 
 ```sh
 make
 make test
 ```
 
-The test uses a mock driver. It covers leases, priority, timed movement,
-events, client loss, raw access, driver loss, and driver restart.
+The tests cover leases, preemption, timed movement, events, connection loss,
+raw access, telemetry, and driver recovery.
+
+Use `make camera` to cross-compile the service and clients for an OpenIPC
+camera.
 
 ## Start the service
 
-The daemon needs a public socket, a driver program, and a driver configuration
-file.
-
-Start the Pelco-D driver for the P035 controller:
+This example starts the P035 Pelco-D driver:
 
 ```sh
 build/motorsd \
@@ -43,41 +43,25 @@ build/motorsd \
   --driver-config ../pelcodtui/cameras/p35-hieasy.conf
 ```
 
-The driver opens the UART and sends its safe startup sequence. It does not
-start movement or homing.
+The selected driver reads and validates its configuration. `motorsd` does not
+interpret hardware-specific values.
 
-CAUTION: Check the UART path, baud rate, address, and movement speeds before
-you use a hardware driver. Incorrect values can move the wrong device.
+CAUTION: Check the UART path, baud rate, address, and speed values. Incorrect
+values can move the wrong device.
 
-The P035 profile contains its transport and driver values:
-
-```ini
-[uart]
-device=/dev/ttyAMA0
-baud=115200
-address=1
-
-[driver]
-stop_repeat=3
-stop_delay_ms=2
-```
-
-The selected driver reads and checks this file. `motorsd` does not interpret
-driver configuration.
-
-The same file describes optional controller menus and commands. Clients can
-request this description without knowing the hardware protocol.
+The driver completes a safe startup before it accepts movement. Startup does
+not resume an old movement or start homing.
 
 ## Use motorsctl
 
-Get the driver state and supported axes:
+Get the driver state and available axes:
 
 ```sh
 build/motorsctl --socket /run/motorsd.sock \
   '{"version":1,"id":"caps","op":"capabilities"}'
 ```
 
-Send a 70 ms focus movement and wait for its lifecycle event:
+Send a 70 ms focus movement:
 
 ```sh
 build/motorsctl --socket /run/motorsd.sock --wait-event \
@@ -86,117 +70,65 @@ build/motorsctl --socket /run/motorsd.sock --wait-event \
   '{"version":1,"id":"move","op":"move","axis":"focus","direction":"near","duration_ms":70}'
 ```
 
-All three requests use one connection. The lease belongs to that connection.
-The driver controls the pulse time and reports when its delivery sequence ends.
+These requests use one connection. The lease belongs to that connection. The
+driver controls the pulse and reports when its delivery sequence ends.
 
-End focus movement from another authorized client:
-
-```sh
-build/motorsctl --socket /run/motorsd.sock \
-  '{"version":1,"id":"stop","op":"stop","axis":"focus"}'
-```
-
-Use `pan`, `tilt`, `zoom`, `focus`, or `iris` as the axis. The driver reports
-which axes exist. Use only a direction that is valid for the selected axis.
-
-The client roles have this priority:
-
-1. `automation`
-2. `af`
-3. `manual`
-4. `safety`
-
-A higher role can preempt a lower role. A client cannot select a custom
-priority.
+The available client roles are `automation`, `af`, `manual`, and `safety`.
+Their priority follows that order. A client cannot choose a custom priority.
 
 ## Use libmotors
 
-Include [`include/libmotors.h`](include/libmotors.h) and link
-`build/libmotors.a` with `json-c`.
+Include `include/libmotors.h`. Link `build/libmotors.a` and `json-c`.
 
-This example gets capabilities and sends one timed focus movement:
+The main movement sequence is:
 
 ```c
-#include <stdio.h>
-
-#include <libmotors.h>
-
-int main(void)
-{
-    struct motors_client *client = NULL;
-    struct motors_capabilities caps;
-    char error[160] = "";
-
-    if (motors_open(&client, "/run/motorsd.sock",
-                    error, sizeof(error)) != 0)
-        goto fail;
-
-    if (motors_get_capabilities(client, &caps,
-                                error, sizeof(error)) != 0)
-        goto fail;
-    if (!caps.available || !(caps.axes & MOTORS_AXIS_MASK(MOTORS_FOCUS))) {
-        snprintf(error, sizeof(error), "focus motor is not available");
-        goto fail;
-    }
-
-    if (motors_subscribe(client, error, sizeof(error)) != 0)
-        goto fail;
-    if (motors_acquire(client, MOTORS_MANUAL, MOTORS_FOCUS, 2000,
-                       error, sizeof(error)) != 0)
-        goto fail;
-    if (motors_move(client, MOTORS_FOCUS, MOTORS_NEAR, 70,
-                    error, sizeof(error)) != 0)
-        goto fail;
-    if (motors_wait_movement(client, MOTORS_FOCUS, 2000, NULL,
-                             error, sizeof(error)) != 0)
-        goto fail;
-
-    motors_close(client);
-    return 0;
-
-fail:
-    fprintf(stderr, "motor error: %s\n", error);
-    motors_close(client);
-    return 1;
-}
+motors_open(&client, "/run/motorsd.sock", error, sizeof(error));
+motors_subscribe(client, error, sizeof(error));
+motors_acquire(client, MOTORS_MANUAL, MOTORS_FOCUS, 2000,
+               error, sizeof(error));
+motors_move(client, MOTORS_FOCUS, MOTORS_NEAR, 70,
+            error, sizeof(error));
+motors_wait_movement(client, MOTORS_FOCUS, 2000, NULL,
+                     error, sizeof(error));
+motors_close(client);
 ```
 
-Compile the example from this directory:
+Production clients must check each return value. They must also check that the
+driver reports the requested axis before movement.
 
-```sh
-cc -Iinclude -o example example.c build/libmotors.a $(pkg-config --libs json-c)
-```
+## Telemetry
 
-`motors_close()` ends the connection. The service ends its lease and any active
-movement.
+Drivers can publish hardware telemetry. The Pelco-XM driver converts a XiongMai
+`X<ratio>` report into a `zoom_magnification` event.
 
-## Driver and service loss
+AF2 reads this event through `libmotors`. It does not open the UART.
 
-If a driver connection closes, `motorsd` cancels its commands and leases. It
-then makes up to three restart attempts. Clients must request new leases after
-a successful restart.
+## Failure behavior
 
-If all restart attempts fail, `motorsd` remains available. A capability request
-then reports `"available":false`, and motor requests return `driver unavailable`.
+If a client disconnects, `motorsd` ends its lease and active movement.
 
-If a client connection closes, `motorsd` ends movement that belongs to that
-client. If the private control connection closes, the driver tries to end its
-active movement and exits.
+If the driver disconnects, `motorsd` revokes affected leases and tries to
+restart it. Clients must acquire new leases after recovery.
 
-## Raw access
+If recovery fails, the service remains available for status requests. It
+rejects movement until the driver becomes available again.
 
-Raw access helps driver development. The payload belongs to the selected
-driver. This Pelco-D example sends one complete frame:
+## Raw access and device settings
 
-```sh
-build/motorsctl --socket /run/motorsd.sock \
-  '{"version":1,"id":"raw","op":"raw","payload":{"bytes":"ff010000000001"}}'
-```
+Raw access supports driver development. The service rejects raw access while
+another client owns a lease. The selected driver validates every payload.
 
-The service rejects raw access while another client has a lease. Normal clients
-use movement operations instead.
+A driver can also describe named controller settings, such as
+`ir.brightness`. Clients display these settings without knowing the hardware
+protocol. The driver validates and translates each command.
+
+See the protocol documents for the complete message formats.
 
 ## Current limits
 
-This code is a host-tested architecture prototype. It is not ready for normal
-installation. See the [prototype roadmap](TODO.md) for the remaining work.
+The architecture and the P035 path have camera tests. Pelco-XM telemetry has
+PTY tests but still needs validation on an 85H50AI controller.
+
+Firmware packaging, permissions, and wider hardware tests remain incomplete.
+See the [prototype roadmap](TODO.md).

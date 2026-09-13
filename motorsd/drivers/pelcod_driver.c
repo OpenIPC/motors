@@ -35,6 +35,7 @@ struct configuration {
     unsigned stop_repeat;
     unsigned stop_delay_ms;
     unsigned sequence_delay_ms;
+    bool pelco_xm;
     bool has_profile;
     char profile_id[96];
     char profile_name[128];
@@ -48,6 +49,8 @@ struct driver_state {
     struct configuration config;
     uint32_t active;
     uint64_t deadlines[MOTORS_AXIS_COUNT];
+    char telemetry[16];
+    size_t telemetry_length;
 };
 
 static uint64_t now_ms(void) {
@@ -186,6 +189,10 @@ static int load_configuration(const char *path, struct configuration *config) {
             if (parse_uint(value, 0, 1000, &config->stop_delay_ms)) goto invalid;
         } else if (driver && !strcmp(key, "sequence_delay_ms")) {
             if (parse_uint(value, 0, 5000, &config->sequence_delay_ms)) goto invalid;
+        } else if (driver && !strcmp(key, "protocol")) {
+            if (!strcmp(value, "pelco-xm")) config->pelco_xm = true;
+            else if (!strcmp(value, "pelco-d")) config->pelco_xm = false;
+            else goto invalid;
         } else if (!*section) {
             errno = EINVAL;
             goto fail;
@@ -220,7 +227,7 @@ fail:
 
 static int open_uart(const struct configuration *config) {
     speed_t speed = baud_value(config->baud);
-    int fd = open(config->device, O_WRONLY | O_NOCTTY | O_CLOEXEC);
+    int fd = open(config->device, O_RDWR | O_NOCTTY | O_CLOEXEC | O_NONBLOCK);
     if (fd < 0) return -1;
     struct termios settings;
     if (tcgetattr(fd, &settings) != 0) goto fail;
@@ -239,22 +246,30 @@ fail:
     return -1;
 }
 
-static void make_frame(unsigned address, uint8_t command1, uint8_t command2,
-                       uint8_t data1, uint8_t data2, uint8_t output[7]) {
-    output[0] = 0xff;
+static size_t make_frame(const struct configuration *config,
+                         uint8_t command1, uint8_t command2,
+                         uint8_t data1, uint8_t data2, uint8_t output[8]) {
+    unsigned address = config->address;
+    output[0] = config->pelco_xm ? 0xc5 : 0xff;
     output[1] = (uint8_t)address;
     output[2] = command1;
     output[3] = command2;
     output[4] = data1;
     output[5] = data2;
-    output[6] = (uint8_t)(address + command1 + command2 + data1 + data2);
+    unsigned sum = address + command1 + command2 + data1 + data2;
+    output[6] = (uint8_t)(config->pelco_xm ? sum % 100U : sum);
+    if (config->pelco_xm) output[7] = 0x5c;
+    return config->pelco_xm ? 8U : 7U;
 }
 
 static int write_all(int fd, const uint8_t *data, size_t length) {
     size_t offset = 0;
     while (offset < length) {
         ssize_t count = write(fd, data + offset, length - offset);
-        if (count < 0 && errno == EINTR) continue;
+        if (count < 0 && (errno == EINTR || errno == EAGAIN)) {
+            sleep_ms(1);
+            continue;
+        }
         if (count <= 0) return -1;
         offset += (size_t)count;
     }
@@ -268,8 +283,8 @@ static int reopen_uart(struct driver_state *state) {
 }
 
 static int send_stop(struct driver_state *state) {
-    uint8_t frame[7];
-    make_frame(state->config.address, 0, 0, 0, 0, frame);
+    uint8_t frame[8];
+    size_t frame_length = make_frame(&state->config, 0, 0, 0, 0, frame);
     unsigned sent = 0;
     int saved_error = EIO;
     for (unsigned attempt = 0; attempt < state->config.stop_repeat; ++attempt) {
@@ -279,7 +294,7 @@ static int send_stop(struct driver_state *state) {
                 sleep_ms(state->config.stop_delay_ms);
             continue;
         }
-        if (write_all(state->uart_fd, frame, sizeof(frame)) == 0)
+        if (write_all(state->uart_fd, frame, frame_length) == 0)
             ++sent;
         else {
             saved_error = errno;
@@ -327,16 +342,17 @@ static int send_move(struct driver_state *state, unsigned axis,
     default:
         return -1;
     }
-    uint8_t frame[7];
-    make_frame(state->config.address, command1, command2, data1, data2, frame);
-    if (write_all(state->uart_fd, frame, sizeof(frame)) == 0) return 0;
+    uint8_t frame[8];
+    size_t frame_length = make_frame(&state->config, command1, command2,
+                                     data1, data2, frame);
+    if (write_all(state->uart_fd, frame, frame_length) == 0) return 0;
 
     // A P035 UART descriptor can fail while the controller remains healthy.
     // Reopen it once so the next logical command does not require a daemon or
     // driver restart. Repeating a continuous movement frame is idempotent.
     int saved_error = errno;
     if (reopen_uart(state) == 0 &&
-        write_all(state->uart_fd, frame, sizeof(frame)) == 0)
+        write_all(state->uart_fd, frame, frame_length) == 0)
         return 0;
     if (errno == 0) errno = saved_error;
     return -1;
@@ -407,6 +423,52 @@ static int send_event(int fd, uint32_t axes) {
     return result;
 }
 
+static int send_zoom_magnification(struct driver_state *state, double value) {
+    struct json_object *event = json_object_new_object();
+    json_object_object_add(event, "version", json_object_new_int(1));
+    json_object_object_add(event, "event", json_object_new_string("telemetry"));
+    json_object_object_add(event, "name",
+                           json_object_new_string("zoom_magnification"));
+    json_object_object_add(event, "value", json_object_new_double(value));
+    json_object_object_add(event, "observed_mono_ms",
+                           json_object_new_int64((int64_t)now_ms()));
+    int result = send_json(state->control_fd, event);
+    json_object_put(event);
+    return result;
+}
+
+static int read_telemetry(struct driver_state *state) {
+    unsigned char input[128];
+    for (;;) {
+        ssize_t count = read(state->uart_fd, input, sizeof(input));
+        if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) return count == 0 ? 0 : -1;
+        for (ssize_t i = 0; i < count; ++i) {
+            unsigned char byte = input[i];
+            if (byte == 'X') {
+                state->telemetry[0] = 'X';
+                state->telemetry_length = 1;
+            } else if (state->telemetry_length) {
+                if (byte == ' ' || byte == '\0' || byte == '\r' || byte == '\n') {
+                    state->telemetry[state->telemetry_length] = '\0';
+                    char *end = NULL;
+                    double value = strtod(state->telemetry + 1, &end);
+                    state->telemetry_length = 0;
+                    if (end && *end == '\0' && value >= 1.0 && value < 40.0 &&
+                        send_zoom_magnification(state, value) != 0)
+                        return -1;
+                } else if ((isdigit(byte) || byte == '.') &&
+                           state->telemetry_length + 1 < sizeof(state->telemetry)) {
+                    state->telemetry[state->telemetry_length++] = (char)byte;
+                } else {
+                    state->telemetry_length = 0;
+                }
+            }
+        }
+    }
+}
+
 static int send_capabilities(const struct driver_state *state, const char *id) {
     struct json_object *reply = json_object_new_object();
     struct json_object *domains = json_object_new_array();
@@ -415,7 +477,9 @@ static int send_capabilities(const struct driver_state *state, const char *id) {
     json_object_object_add(reply, "version", json_object_new_int(1));
     json_object_object_add(reply, "id", json_object_new_string(id));
     json_object_object_add(reply, "ok", json_object_new_boolean(true));
-    json_object_object_add(reply, "name", json_object_new_string("pelcod"));
+    json_object_object_add(reply, "name",
+                           json_object_new_string(state->config.pelco_xm
+                                                      ? "pelco-xm" : "pelcod"));
     json_object_object_add(reply, "axes", json_object_new_int(0x0f));
     json_object_object_add(reply, "stop_domains", domains);
     json_object_object_add(reply, "raw", json_object_new_boolean(true));
@@ -661,12 +725,12 @@ static int execute_sequence(struct driver_state *state, const char *sequence) {
         else if (!strcmp(operation, "preset_call")) command2 = 0x07;
         else if (!strcmp(operation, "preset_clear")) command2 = 0x05;
         else return -1;
-        uint8_t frame[7];
-        make_frame(state->config.address, 0, command2, 0,
-                   (uint8_t)preset, frame);
-        if (write_all(state->uart_fd, frame, sizeof(frame)) != 0) {
+        uint8_t frame[8];
+        size_t frame_length = make_frame(&state->config, 0, command2, 0,
+                                         (uint8_t)preset, frame);
+        if (write_all(state->uart_fd, frame, frame_length) != 0) {
             if (reopen_uart(state) != 0 ||
-                write_all(state->uart_fd, frame, sizeof(frame)) != 0)
+                write_all(state->uart_fd, frame, frame_length) != 0)
                 return -1;
         }
         if (save && *save) sleep_ms(state->config.sequence_delay_ms);
@@ -831,6 +895,16 @@ int main(int argc, char **argv) {
         return 2;
     }
 
+    if (state.config.pelco_xm) {
+        static const uint8_t wake[] = {0xa5, 0x7b, 0x9e, 0xf0,
+                                       0xef, 0xee, 0xe0, 0xf4};
+        if (write_all(state.uart_fd, wake, sizeof(wake)) != 0) {
+            fprintf(stderr, "XiongMai startup failed: %s\n", strerror(errno));
+            close(state.uart_fd);
+            return 2;
+        }
+    }
+
     /* A neutral frame makes startup safe without starting motion or homing. */
     if (send_stop(&state) != 0) {
         fprintf(stderr, "safe startup failed: %s\n", strerror(errno));
@@ -840,8 +914,11 @@ int main(int argc, char **argv) {
 
     int exit_code = 0;
     for (;;) {
-        struct pollfd descriptor = {.fd = control_fd, .events = POLLIN};
-        int result = poll(&descriptor, 1, next_timeout(&state));
+        struct pollfd descriptors[2] = {
+            {.fd = control_fd, .events = POLLIN},
+            {.fd = state.uart_fd, .events = POLLIN},
+        };
+        int result = poll(descriptors, 2, next_timeout(&state));
         if (result < 0) {
             if (errno == EINTR) continue;
             exit_code = 1;
@@ -852,6 +929,11 @@ int main(int argc, char **argv) {
             break;
         }
         if (!result) continue;
+        if (descriptors[1].revents & POLLIN && read_telemetry(&state) != 0) {
+            exit_code = 1;
+            break;
+        }
+        if (!(descriptors[0].revents & POLLIN)) continue;
         char message[MESSAGE_MAX + 1];
         ssize_t length = recv(control_fd, message, MESSAGE_MAX, 0);
         if (length <= 0) {

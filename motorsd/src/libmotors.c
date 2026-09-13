@@ -21,6 +21,9 @@ struct motors_client {
     unsigned revoked_axes;
     unsigned completed_axes;
     uint64_t completed_mono_ms[MOTORS_IRIS + 1];
+    bool has_zoom_magnification;
+    float zoom_magnification;
+    uint64_t zoom_observed_mono_ms;
 };
 
 static const char *const axes[] = {"pan", "tilt", "zoom", "focus", "iris"};
@@ -59,6 +62,27 @@ static int process_event(struct motors_client *client,
             for (unsigned axis = 0; axis <= MOTORS_IRIS; ++axis) {
                 if (mask & (1U << axis))
                     client->completed_mono_ms[axis] = timestamp;
+            }
+        }
+    } else if (!strcmp(json_object_get_string(event), "telemetry")) {
+        struct json_object *name = NULL;
+        struct json_object *value = NULL;
+        struct json_object *observed = NULL;
+        if (json_object_object_get_ex(object, "name", &name) &&
+            json_object_is_type(name, json_type_string) &&
+            !strcmp(json_object_get_string(name), "zoom_magnification") &&
+            json_object_object_get_ex(object, "value", &value) &&
+            (json_object_is_type(value, json_type_double) ||
+             json_object_is_type(value, json_type_int))) {
+            double parsed = json_object_get_double(value);
+            if (parsed >= 1.0 && parsed <= 1000.0) {
+                client->has_zoom_magnification = true;
+                client->zoom_magnification = (float)parsed;
+                if (json_object_object_get_ex(object, "driver_observed_mono_ms",
+                                              &observed) &&
+                    json_object_is_type(observed, json_type_int))
+                    client->zoom_observed_mono_ms =
+                        (uint64_t)json_object_get_int64(observed);
             }
         }
     }
@@ -381,6 +405,15 @@ bool motors_lease_revoked(const struct motors_client *client,
                           enum motors_client_axis axis) {
     return client && axis <= MOTORS_IRIS &&
            (client->revoked_axes & (1U << (unsigned)axis));
+}
+
+bool motors_zoom_magnification(const struct motors_client *client,
+                               float *magnification,
+                               uint64_t *observed_mono_ms) {
+    if (!client || !client->has_zoom_magnification) return false;
+    if (magnification) *magnification = client->zoom_magnification;
+    if (observed_mono_ms) *observed_mono_ms = client->zoom_observed_mono_ms;
+    return true;
 }
 
 static uint64_t monotonic_ms(void) {

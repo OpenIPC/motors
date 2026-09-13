@@ -14,10 +14,11 @@ It does not define the final implementation order.
 - [x] Continuous and timed movement
 - [x] Driver-owned movement timing and hardware delivery rules
 - [x] Lifecycle events with monotonic driver timestamps
+- [x] Generic telemetry events and XiongMai zoom magnification reports
 - [x] Driver failure detection and restart attempts
 - [x] Development raw access with lease protection
 - [x] Mock-driver architecture tests
-- [x] Pelco-D prototype driver and P035 configuration
+- [x] Pelco-D and Pelco-XM prototype paths
 - [x] Driver-described menus and named device commands
 - [x] `pelcodtui` client through the public service API
 
@@ -29,7 +30,7 @@ It does not define the final implementation order.
 - [ ] Define which clients can use the `safety` role and add the typed C wrapper if required.
 - [ ] Load driver selection and essential hardware configuration from OpenIPC ENV.
 - [ ] Define protocol compatibility rules for future versions.
-- [ ] Add driver-described settings to the WebUI.
+- [ ] Merge the WebUI integration for driver-described settings.
 
 ## Hardware validation
 
@@ -41,6 +42,7 @@ It does not define the final implementation order.
 - [ ] Validate driver failure and recovery during active movement.
 - [ ] Validate service shutdown and camera restart behavior.
 - [ ] Record the meaning and accuracy of each driver timestamp.
+- [ ] Check AF2 with live XiongMai magnification events on an 85H50AI.
 
 ## Later scope
 

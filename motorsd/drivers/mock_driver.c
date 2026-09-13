@@ -192,6 +192,26 @@ static int handle_request(int fd, FILE *trace, uint32_t *active,
             fflush(trace);
             _exit(42);
         }
+        struct json_object *magnification = NULL;
+        if (json_object_is_type(payload, json_type_object) &&
+            json_object_object_get_ex(payload, "zoom_magnification",
+                                      &magnification)) {
+            struct json_object *event = json_object_new_object();
+            json_object_object_add(event, "version", json_object_new_int(1));
+            json_object_object_add(event, "event",
+                                   json_object_new_string("telemetry"));
+            json_object_object_add(event, "name",
+                                   json_object_new_string("zoom_magnification"));
+            json_object_object_add(event, "value",
+                                   json_object_get(magnification));
+            json_object_object_add(event, "observed_mono_ms",
+                                   json_object_new_int64((int64_t)now_ms()));
+            const char *text = json_object_to_json_string_ext(
+                event, JSON_C_TO_STRING_PLAIN);
+            int result = send(fd, text, strlen(text), MSG_NOSIGNAL) < 0 ? -1 : 0;
+            json_object_put(event);
+            if (result != 0) return result;
+        }
         fprintf(trace, "RAW payload=%s\n",
                 json_object_to_json_string_ext(payload, JSON_C_TO_STRING_PLAIN));
         return send_reply(fd, id, true, "sent");

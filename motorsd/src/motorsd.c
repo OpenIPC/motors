@@ -251,10 +251,47 @@ static void clear_domain(struct daemon_state *state, uint32_t domain, bool clear
 static void handle_driver_event(struct daemon_state *state,
                                 struct json_object *event) {
     struct json_object *name = NULL;
-    struct json_object *axes = NULL;
     if (!json_object_object_get_ex(event, "event", &name) ||
-        !json_object_object_get_ex(event, "axes", &axes))
+        !json_object_is_type(name, json_type_string)) return;
+
+    if (!strcmp(json_object_get_string(name), "telemetry")) {
+        struct json_object *telemetry_name = NULL;
+        struct json_object *value = NULL;
+        if (!json_object_object_get_ex(event, "name", &telemetry_name) ||
+            !json_object_is_type(telemetry_name, json_type_string) ||
+            strcmp(json_object_get_string(telemetry_name), "zoom_magnification") ||
+            !json_object_object_get_ex(event, "value", &value) ||
+            (!json_object_is_type(value, json_type_double) &&
+             !json_object_is_type(value, json_type_int))) return;
+        double parsed = json_object_get_double(value);
+        if (parsed < 1.0 || parsed > 1000.0) return;
+
+        struct json_object *message = json_object_new_object();
+        json_object_object_add(message, "version", json_object_new_int(1));
+        json_object_object_add(message, "event", json_object_new_string("telemetry"));
+        json_object_object_add(message, "name",
+                               json_object_new_string("zoom_magnification"));
+        json_object_object_add(message, "value", json_object_new_double(parsed));
+        struct json_object *observed = NULL;
+        if (json_object_object_get_ex(event, "observed_mono_ms", &observed) &&
+            json_object_is_type(observed, json_type_int))
+            json_object_object_add(message, "driver_observed_mono_ms",
+                                   json_object_get(observed));
+        const char *text = json_object_to_json_string_ext(
+            message, JSON_C_TO_STRING_PLAIN);
+        for (unsigned i = 0; i < CLIENT_MAX; ++i) {
+            struct client *client = &state->clients[i];
+            if (client->fd >= 0 && client->subscribed)
+                (void)send(client->fd, text, strlen(text),
+                           MSG_NOSIGNAL | MSG_DONTWAIT);
+        }
+        json_object_put(message);
         return;
+    }
+
+    struct json_object *axes = NULL;
+    if (!json_object_object_get_ex(event, "axes", &axes) ||
+        !json_object_is_type(axes, json_type_int)) return;
     uint32_t domain = (uint32_t)json_object_get_int64(axes);
     clear_domain(state, domain, false);
 

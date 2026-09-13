@@ -125,6 +125,23 @@ def run_test():
             described.close()
             assert "COMMAND name=test.level value=5" in read_lines(trace_path)
 
+            telemetry_observer = Client(socket_path)
+            expect(telemetry_observer.request({"version": 1, "id": "telemetry-subscribe",
+                                               "op": "subscribe"}),
+                   state="subscribed")
+            telemetry_sender = Client(socket_path)
+            expect(telemetry_sender.request({
+                "version": 1, "id": "telemetry", "op": "raw",
+                "payload": {"zoom_magnification": 3.2},
+            }), state="raw_sent")
+            telemetry = telemetry_observer.receive()
+            assert telemetry["event"] == "telemetry", telemetry
+            assert telemetry["name"] == "zoom_magnification", telemetry
+            assert telemetry["value"] == 3.2, telemetry
+            assert isinstance(telemetry.get("driver_observed_mono_ms"), int), telemetry
+            telemetry_sender.close()
+            telemetry_observer.close()
+
             library_af = subprocess.Popen(
                 [str(LIBMOTORS_PREEMPTION), str(socket_path)],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -427,6 +444,60 @@ def test_pelcod_driver():
         assert driver.returncode == 0, driver.stderr.read()
 
 
+def test_xiongmai_driver_telemetry():
+    with tempfile.TemporaryDirectory(prefix="pelco-xm-driver-test-") as directory:
+        temp = pathlib.Path(directory)
+        master, slave = pty.openpty()
+        config = temp / "pelco-xm.conf"
+        config.write_text(
+            f"device={os.ttyname(slave)}\nbaud=115200\naddress=1\n"
+            "protocol=pelco-xm\nstop_repeat=1\n",
+            encoding="utf-8",
+        )
+        parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+        driver = subprocess.Popen(
+            [str(PELCOD_DRIVER), "--fd", str(child.fileno()), "--config", str(config)],
+            pass_fds=(child.fileno(),), stderr=subprocess.PIPE, text=True,
+        )
+        child.close()
+
+        def read_exact(length):
+            data = b""
+            deadline = time.monotonic() + 1
+            while len(data) < length and time.monotonic() < deadline:
+                data += os.read(master, length - len(data))
+            assert len(data) == length, data
+            return data
+
+        try:
+            assert read_exact(16) == bytes.fromhex(
+                "a57b9ef0efeee0f4c50100000000015c"
+            )
+            parent.send(json.dumps({"version": 1, "id": "caps",
+                                    "op": "capabilities"}).encode())
+            caps = json.loads(parent.recv(4096))
+            assert caps["name"] == "pelco-xm", caps
+
+            parent.send(json.dumps({"version": 1, "id": "move", "op": "move",
+                                    "axis": 2, "direction": "tele",
+                                    "duration_ms": 0}).encode())
+            expect(json.loads(parent.recv(4096)), state="sent")
+            assert read_exact(8) == bytes.fromhex("c50100200000215c")
+
+            os.write(master, b"noise X3.2 ")
+            event = json.loads(parent.recv(4096))
+            assert event["event"] == "telemetry", event
+            assert event["name"] == "zoom_magnification", event
+            assert event["value"] == 3.2, event
+            assert isinstance(event.get("observed_mono_ms"), int), event
+        finally:
+            parent.close()
+            driver.wait(timeout=1)
+            os.close(slave)
+            os.close(master)
+        assert driver.returncode == 0, driver.stderr.read()
+
+
 def test_failed_driver_recovery():
     with tempfile.TemporaryDirectory(prefix="motorsd-recovery-test-") as directory:
         temp = pathlib.Path(directory)
@@ -501,5 +572,6 @@ def test_failed_driver_recovery():
 if __name__ == "__main__":
     run_test()
     test_pelcod_driver()
+    test_xiongmai_driver_telemetry()
     test_failed_driver_recovery()
-    print("PASS: persistent driver IPC, leases, preemption, crash recovery, and raw access")
+    print("PASS: driver IPC, leases, preemption, telemetry, recovery, and raw access")

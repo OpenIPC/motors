@@ -41,6 +41,15 @@ does not prove that the hardware moved.
 The driver can send a lifecycle event before a response. `motorsd` processes
 the event and continues to wait for the matching response.
 
+The driver can also send hardware telemetry:
+
+```json
+{"version":1,"event":"telemetry","name":"zoom_magnification","value":3.2,"observed_mono_ms":502950}
+```
+
+Version 1 accepts `zoom_magnification` values from `1.0` through `1000.0`.
+The timestamp records when the driver parsed the report from the hardware.
+
 ## Axis values
 
 Requests use these numeric axis values:

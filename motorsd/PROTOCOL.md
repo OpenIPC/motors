@@ -125,6 +125,16 @@ The service reports a lost lease with this event:
 
 The current reasons are `preempted`, `expired`, and `driver_failure`.
 
+A driver can publish hardware telemetry without giving clients transport
+access. The XiongMai driver publishes its reported zoom magnification:
+
+```json
+{"version":1,"event":"telemetry","name":"zoom_magnification","value":3.2,"driver_observed_mono_ms":502950}
+```
+
+`driver_observed_mono_ms` records when the driver parsed the hardware report.
+`libmotors` clients read the last report with `motors_zoom_magnification()`.
+
 ## Raw access
 
 The `raw` operation sends a driver-specific diagnostic payload:
