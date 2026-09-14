@@ -2,6 +2,15 @@
 
 Various code to manage motor hardware
 
+## Common motor service prototype
+
+[`motorsd`](motorsd/) is a host-tested prototype for shared motor control.
+It contains the service, the public socket protocol, `libmotors`, command-line
+access, separate driver programs, and architecture tests.
+
+Read the [`motorsd` documentation](motorsd/README.md) for the current scope and
+usage examples.
+
 ## Pelco-D configuration TUI
 
 [`pelcodtui`](pelcodtui/) is an ncurses interface for Pelco-D PTZ controller
