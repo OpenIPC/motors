@@ -2,6 +2,13 @@
 
 Various code to manage motor hardware
 
+## Anjoy motor control
+
+[`anjoy-motor`](anjoy-motor/) drives the zoom/focus/iris lens motors and the
+pan/tilt head of Anjoy AF camera modules over their motor-MCU UART
+(Pelco-D-style frames), and decodes the MCU's live position reports.
+Protocol recovered from a live MTF45-4G_AF.
+
 ## Pelco-D configuration TUI
 
 [`pelcodtui`](pelcodtui/) is an ncurses interface for Pelco-D PTZ controller
