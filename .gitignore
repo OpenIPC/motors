@@ -1,3 +1,4 @@
 *.o
 xm-uart-motors-*
 xm-kmotor-*
+anjoy-motor-*

@@ -23,7 +23,7 @@
 #
 # There is deliberately no `paths:` filter on the trigger. A workflow filtered
 # out by `paths:` does not run at all, so a required check from it would sit
-# The whole repo is six C tools and a build takes under a minute, so there is
+# The whole repo is seven C tools and a build takes under a minute, so there is
 # nothing to narrow.
 name: gcc-compat
 
@@ -136,7 +136,10 @@ jobs:
           for t in xm-kmotor xm-uart camhi-motor i2c-motor; do
             build arm-linux-gnueabihf-gcc "$t" "$t/main.c"
           done
+          # Both of these link pow(); glibc keeps it in libm (the musl
+          # OpenIPC toolchains fold libm into libc, so -lm is a no-op there).
           build arm-linux-gnueabihf-gcc i2c-motor-sigmastar i2c-motor/sigmastar-ssc338q/main.c -lm
+          build arm-linux-gnueabihf-gcc anjoy-motor anjoy-motor/main.c -lm
 
           # ingenic-motor targets the Ingenic T31, which is MIPS little-endian,
           # NOT ARM. Its OpenIPC toolchain is mipsel-openipc-linux-musl-.
