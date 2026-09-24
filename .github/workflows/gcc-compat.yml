@@ -133,10 +133,13 @@ jobs:
           }
 
           # ARM targets: Xiongmai, HiSilicon, and SigmaStar SoCs.
-          for t in xm-kmotor xm-uart camhi-motor i2c-motor anjoy-motor; do
+          for t in xm-kmotor xm-uart camhi-motor i2c-motor; do
             build arm-linux-gnueabihf-gcc "$t" "$t/main.c"
           done
+          # Both of these link pow(); glibc keeps it in libm (the musl
+          # OpenIPC toolchains fold libm into libc, so -lm is a no-op there).
           build arm-linux-gnueabihf-gcc i2c-motor-sigmastar i2c-motor/sigmastar-ssc338q/main.c -lm
+          build arm-linux-gnueabihf-gcc anjoy-motor anjoy-motor/main.c -lm
 
           # ingenic-motor targets the Ingenic T31, which is MIPS little-endian,
           # NOT ARM. Its OpenIPC toolchain is mipsel-openipc-linux-musl-.

@@ -136,6 +136,8 @@ static void usage(const char *prog) {
   printf("            while the motor moves; long -r keeps the session alive)\n");
   printf("  -j        decode reports as one JSON object per line on stdout (TX\n");
   printf("            diagnostics go to stderr)\n");
+  printf("  verb T exits 0 when the final reported position equals the\n");
+  printf("            target, 1 on a miss or dead link\n");
   printf("  -D dev    UART device (default /dev/ttyS2)\n");
   printf("  -B        inherit port settings (do not touch termios)\n");
 }
@@ -258,7 +260,9 @@ static int multiple_to_pos(double m) {
  * Streams STATE frames at the vendor cadence, pumps RX, and calls the
  * caller's pump callback once per iteration. Runs until deadline. */
 
-typedef void (*pump_fn)(void *ctx, long elapsed_ms);
+/* a pump may return 1 to end the session early (goto has reached its
+ * target; the caller still sends the safety stop frame after the run) */
+typedef int (*pump_fn)(void *ctx, long elapsed_ms);
 
 struct session {
   int fd;
@@ -304,8 +308,6 @@ static void session_init(struct session *s, int fd, int json) {
   usleep(500000);
   write(fd, EXVER, sizeof EXVER);
   usleep(400000);
-  usleep(20000);
-  write(fd, EXVER, sizeof EXVER);
 
   STATE[15] = 0; /* in case of a re-run */
   for (int i = 0; i < 15; i++)
@@ -343,8 +345,8 @@ static void session_run(struct session *s, long total_ms, pump_fn pump, void *ct
   long t0 = now_ms();
   while (now_ms() - t0 < total_ms) {
     session_slice(s);
-    if (pump)
-      pump(ctx, now_ms() - t0);
+    if (pump && pump(ctx, now_ms() - t0))
+      break; /* pump signalled completion */
   }
 }
 
@@ -360,7 +362,7 @@ struct move_ctx {
   const struct verb *verb;
 };
 
-static void move_pump(void *vctx, long elapsed) {
+static int move_pump(void *vctx, long elapsed) {
   struct move_ctx *m = vctx;
   if (m->need_stop && elapsed >= m->hold_ms) {
     print_frame("TX", m->stop_frame, 7, m->json);
@@ -368,6 +370,7 @@ static void move_pump(void *vctx, long elapsed) {
     m->need_stop = 0;
     m->done_ms = elapsed;
   }
+  return 0; /* keep the session for the -r listen window */
 }
 
 struct goto_ctx {
@@ -394,10 +397,10 @@ static void goto_send(struct goto_ctx *g, const unsigned char *f, int n) {
   write(g->fd, f, n);
 }
 
-static void goto_pump(void *vctx, long elapsed) {
+static int goto_pump(void *vctx, long elapsed) {
   struct goto_ctx *g = vctx;
   if (g->phase == 2)
-    return;
+    return 1; /* done — session_run exits after this slice */
 
   if (g_report_frames != g->frames_seen) { /* a NEW frame just arrived */
     g->frames_seen = g_report_frames;
@@ -413,22 +416,22 @@ static void goto_pump(void *vctx, long elapsed) {
         g->sent_dir = 0;
         g->phase = 1;
         g->phase_t0 = elapsed;
-        return;
+        return 0;
       }
       int want = g->start_side > 0 ? -1 : +1; /* towards target */
       if (want != g->sent_dir) { /* initial guess was wrong */
         goto_send(g, g->stop, 7);
         goto_send(g, want > 0 ? g->tele : g->wide, 7);
         g->sent_dir = want;
-        return;
+        return 0;
       }
     }
     if (g_zoom_pos < 0)
-      return; /* wait for the first report (only arrives in motion) */
+      return 0; /* wait for the first report (only arrives in motion) */
     if (elapsed - g->last_report_ms > 4000) { /* dead link */
       goto_send(g, g->stop, 7);
       g->phase = 2;
-      return;
+      return 0;
     }
     /* crossed the target while moving? */
     if ((g->start_side > 0 && g_zoom_pos <= g->target) ||
@@ -438,18 +441,20 @@ static void goto_pump(void *vctx, long elapsed) {
       g->phase = 1;
       g->phase_t0 = elapsed;
     }
-    return;
+    return 0;
   }
 
   if (g->phase == 1) {
     if (elapsed - g->phase_t0 < 700)
-      return; /* let the lens halt; reports may keep arriving */
-    if (g->corr_done) /* correction round already spent: accept +-1, done */
-      { g->phase = 2; return; }
+      return 0; /* let the lens halt; reports may keep arriving */
+    if (g->corr_done) { /* correction round spent: accept +-1, done */
+      g->phase = 2;
+      return 0;
+    }
     int delta = g_zoom_pos - g->target;
     if (delta == 0 || g_zoom_pos < 0) {
       g->phase = 2;
-      return;
+      return 0;
     }
     /* ONE slow closed-loop approach toward the target. Short pulses are
      * invisible to the loop (reports are sparse at crawl speed — pulses
@@ -461,7 +466,7 @@ static void goto_pump(void *vctx, long elapsed) {
     g->corr_done = 1;
     g->phase = 3;
     g->phase_t0 = elapsed;
-    return;
+    return 0;
   }
 
   if (g->phase == 3) { /* slow approach: stop on crossing or budget end */
@@ -473,13 +478,14 @@ static void goto_pump(void *vctx, long elapsed) {
       g->phase = 4;
       g->phase_t0 = elapsed;
     }
-    return;
+    return 0;
   }
 
   if (g->phase == 4) { /* final settle, then done regardless */
     if (elapsed - g->phase_t0 >= 800)
       g->phase = 2;
   }
+  return 0;
 }
 
 int main(int argc, char **argv) {
@@ -492,6 +498,7 @@ int main(int argc, char **argv) {
   int json = 0;
   double mult = -1.0;
   int pos_target = -1;
+  int rc = 0;
 
   int opt;
   while ((opt = getopt(argc, argv, "d:t:s:m:p:r:D:Bjh")) != -1) {
@@ -609,6 +616,7 @@ int main(int argc, char **argv) {
      * stop once because reports were being consumed by another process) */
     write(fd, g.stop, 7);
     fprintf(stderr, "final position %d\n", g_zoom_pos);
+    rc = g_zoom_pos != g.target; /* exit 0 on target, 1 on miss/dead link */
   } else {
     unsigned char f[7];
     build_frame(f, verb, speed);
@@ -631,5 +639,5 @@ int main(int argc, char **argv) {
   }
 
   close(fd);
-  return 0;
+  return rc;
 }

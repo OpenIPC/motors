@@ -112,8 +112,11 @@ The loop then:
 4. always ends with a stop frame, even on the 30 s budget expiry or a
    dead RX link.
 
-Verified both directions with exact landings: `21→8`, `9→20`, `final
-position` == target.
+Verified live in both directions with exact landings and `exit 0`:
+`21→8`, `9→20`, `20→3` (`-p`), `3→15` (`-m 12.5` → position 15), plus a
+`-p 1` park at the wide endstop. A miss or a dead RX link exits 1; the
+session ends as soon as the loop is done (the 30 s budget is a ceiling,
+not a run time), and a stop frame always goes out on the way out.
 
 ```
 ./anjoy-motor -d T -m 12.5 -j       # zoom to ~12.5x
