@@ -78,12 +78,64 @@
 #include <fcntl.h>
 #include <math.h>
 #include <poll.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
+
+/* ---------------- small utils ---------------- */
+
+/* Write the whole frame out the O_NONBLOCK fd: loop over partial writes
+ * and transient EAGAIN. A 7-16 byte frame at 57600 baud never stalls the
+ * tty buffer in practice, but the safety-stop writes must not gamble on
+ * that — a dropped stop frame leaves a motor running into its endstop.
+ * Bounded retries (~5 s worst case), then it says why on stderr. */
+static int xwrite(int fd, const void *buf, size_t n) {
+  const unsigned char *p = buf;
+  for (int tries = 0; n > 0;) {
+    ssize_t w = write(fd, p, n);
+    if (w > 0) {
+      p += w;
+      n -= (size_t)w;
+      continue;
+    }
+    if (w < 0 && errno == EINTR)
+      continue;
+    if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) && tries++ < 100) {
+      struct pollfd pf = {fd, POLLOUT, 0};
+      poll(&pf, 1, 50);
+      continue;
+    }
+    fprintf(stderr, "write(%d bytes): %s\n", (int)n,
+            w < 0 ? strerror(errno) : "short write");
+    return -1;
+  }
+  return 0;
+}
+
+/* strict option parsing: the whole string must be one number */
+static int parse_double_opt(const char *s, double *out) {
+  char *end;
+  errno = 0;
+  double v = strtod(s, &end);
+  if (end == s || *end != '\0' || errno == ERANGE || !isfinite(v))
+    return -1;
+  *out = v;
+  return 0;
+}
+
+static int parse_int_opt(const char *s, long *out) {
+  char *end;
+  errno = 0;
+  long v = strtol(s, &end, 0);
+  if (end == s || *end != '\0' || errno == ERANGE)
+    return -1;
+  *out = v;
+  return 0;
+}
 
 struct verb {
   char key;
@@ -137,7 +189,8 @@ static void usage(const char *prog) {
   printf("  -j        decode reports as one JSON object per line on stdout (TX\n");
   printf("            diagnostics go to stderr)\n");
   printf("  verb T exits 0 when the final reported position equals the\n");
-  printf("            target, 1 on a miss or dead link\n");
+  printf("            target, 1 on a miss, a dead link, or a failed stop\n");
+  printf("            frame\n");
   printf("  -D dev    UART device (default /dev/ttyS2)\n");
   printf("  -B        inherit port settings (do not touch termios)\n");
 }
@@ -183,13 +236,17 @@ static void report_feed(unsigned char *buf, int *len, unsigned char b, int json)
   for (int i = 0; i < REPORT_LEN - 1; i++)
     ck += buf[i];
   if (ck == buf[REPORT_LEN - 1]) {
-    g_report_frames++;
     /* zoom bytes 9-10 are DECIMAL DIGITS: tens (0 encoded as 0x3B) x 10
      * + units -> live position 1..30 wide->tele. Focus bytes 13-14 stay
-     * raw 16-bit: observed 14 0F / 16 0F, not position-tracking. */
+     * raw 16-bit: observed 14 0F / 16 0F, not position-tracking.
+     * Clock-valid shutdown garbage (all-3B -> zoom > 30) is printed for
+     * diagnosis but must NOT count as feedback: the goto dead-link
+     * watchdog below consumes only position-valid frames. */
     int zoom = (buf[9] == 0x3B ? 0 : buf[9]) * 10 + buf[10];
-    if (zoom >= 1 && zoom <= 30)
+    if (zoom >= 1 && zoom <= 30) {
       g_zoom_pos = zoom;
+      g_report_frames++;
+    }
     g_focus_raw = buf[13] * 256 + buf[14];
     if (json) {
       printf("{\"zoom_pos\":%d,\"focus_pos\":%d,\"flags\":\"%02X%02X\",\"raw\":\"",
@@ -225,10 +282,10 @@ static void report_feed(unsigned char *buf, int *len, unsigned char b, int json)
 
 /* ---------------- timing ---------------- */
 
-static long now_ms(void) {
+static int64_t now_ms(void) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
-  return ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+  return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
 /* ---------------- position <-> optical multiple ----------------
@@ -262,15 +319,15 @@ static int multiple_to_pos(double m) {
 
 /* a pump may return 1 to end the session early (goto has reached its
  * target; the caller still sends the safety stop frame after the run) */
-typedef int (*pump_fn)(void *ctx, long elapsed_ms);
+typedef int (*pump_fn)(void *ctx, int64_t elapsed_ms);
 
 struct session {
   int fd;
   int json;
   unsigned char rbuf[REPORT_LEN];
   int rlen;
-  long last_state_ms;
-  long last_poll_ms;
+  int64_t last_state_ms;
+  int64_t last_poll_ms;
 };
 
 static void session_drain_rx(struct session *s) {
@@ -298,15 +355,15 @@ static void session_init(struct session *s, int fd, int json) {
   static const unsigned char END[] = {0x45, 0x4e, 0x44, 0xd7};
   static const unsigned char VER[] = {0x56, 0x45, 0x52, 0xed};
   static const unsigned char EXVER[] = {0x45, 0x58, 0x56, 0x45, 0x52, 0x8a};
-  write(fd, END, sizeof END);
+  xwrite(fd, END, sizeof END);
   usleep(300000);
-  write(fd, END, sizeof END);
+  xwrite(fd, END, sizeof END);
   usleep(300000);
-  write(fd, VER, sizeof VER);
+  xwrite(fd, VER, sizeof VER);
   usleep(500000);
-  write(fd, EXVER, sizeof EXVER);
+  xwrite(fd, EXVER, sizeof EXVER);
   usleep(500000);
-  write(fd, EXVER, sizeof EXVER);
+  xwrite(fd, EXVER, sizeof EXVER);
   usleep(400000);
 
   STATE[15] = 0; /* in case of a re-run */
@@ -318,7 +375,7 @@ static void session_init(struct session *s, int fd, int json) {
    * has seen a live state stream for a few seconds. Two frames buy
    * silence; 14 frames (~280 ms apart, ≈4 s) wake it up. */
   for (int i = 0; i < 14; i++) {
-    write(fd, STATE, sizeof STATE);
+    xwrite(fd, STATE, sizeof STATE);
     usleep(280000);
   }
   s->last_state_ms = now_ms();
@@ -326,13 +383,13 @@ static void session_init(struct session *s, int fd, int json) {
 
 /* one 20 ms slice: stream STATE when due, poll rarely, drain RX */
 static void session_slice(struct session *s) {
-  long now = now_ms();
+  int64_t now = now_ms();
   if (now - s->last_state_ms >= STATE_PERIOD_MS) {
-    write(s->fd, STATE, sizeof STATE);
+    xwrite(s->fd, STATE, sizeof STATE);
     s->last_state_ms = now;
   }
   if (now - s->last_poll_ms >= 10000) {
-    write(s->fd, POLL9, sizeof POLL9);
+    xwrite(s->fd, POLL9, sizeof POLL9);
     s->last_poll_ms = now;
   }
   session_drain_rx(s);
@@ -341,8 +398,8 @@ static void session_slice(struct session *s) {
 }
 
 /* run the session for `total_ms`, calling pump(ctx) every slice */
-static void session_run(struct session *s, long total_ms, pump_fn pump, void *ctx) {
-  long t0 = now_ms();
+static void session_run(struct session *s, int64_t total_ms, pump_fn pump, void *ctx) {
+  int64_t t0 = now_ms();
   while (now_ms() - t0 < total_ms) {
     session_slice(s);
     if (pump && pump(ctx, now_ms() - t0))
@@ -355,18 +412,18 @@ static void session_run(struct session *s, long total_ms, pump_fn pump, void *ct
 struct move_ctx {
   int fd;
   int json;
-  int done_ms;       /* when the auto-stop fired, 0 = not yet */
-  long hold_ms;
+  int64_t done_ms;    /* when the auto-stop fired, 0 = not yet */
+  int64_t hold_ms;
   unsigned char stop_frame[7];
   int need_stop;
   const struct verb *verb;
 };
 
-static int move_pump(void *vctx, long elapsed) {
+static int move_pump(void *vctx, int64_t elapsed) {
   struct move_ctx *m = vctx;
   if (m->need_stop && elapsed >= m->hold_ms) {
     print_frame("TX", m->stop_frame, 7, m->json);
-    write(m->fd, m->stop_frame, 7);
+    xwrite(m->fd, m->stop_frame, 7);
     m->need_stop = 0;
     m->done_ms = elapsed;
   }
@@ -384,20 +441,20 @@ struct goto_ctx {
   int json;
   /* state machine: 0 approach, 1 halted/settling, 2 done, 3 correcting */
   int phase;
-  long phase_t0;
+  int64_t phase_t0;
   int sent_dir;    /* +1 tele command in flight, -1 wide, 0 none */
   int start_side;  /* sign(first_pos - target), 0 unknown */
-  long last_report_ms;
+  int64_t last_report_ms;
   int corr_done;   /* the single correction round has been used */
   unsigned long frames_seen;
 };
 
 static void goto_send(struct goto_ctx *g, const unsigned char *f, int n) {
   print_frame("TX", f, n, g->json);
-  write(g->fd, f, n);
+  xwrite(g->fd, f, n);
 }
 
-static int goto_pump(void *vctx, long elapsed) {
+static int goto_pump(void *vctx, int64_t elapsed) {
   struct goto_ctx *g = vctx;
   if (g->phase == 2)
     return 1; /* done — session_run exits after this slice */
@@ -426,13 +483,16 @@ static int goto_pump(void *vctx, long elapsed) {
         return 0;
       }
     }
-    if (g_zoom_pos < 0)
-      return 0; /* wait for the first report (only arrives in motion) */
-    if (elapsed - g->last_report_ms > 4000) { /* dead link */
+    /* dead-link check BEFORE the wait-for-first-report return: a silent
+     * RX from the very start must abort after the same 4 s, not drive
+     * the lens blind for the whole 30 s budget */
+    if (elapsed - g->last_report_ms > 4000) {
       goto_send(g, g->stop, 7);
       g->phase = 2;
       return 0;
     }
+    if (g_zoom_pos < 0)
+      return 0; /* wait for the first report (only arrives in motion) */
     /* crossed the target while moving? */
     if ((g->start_side > 0 && g_zoom_pos <= g->target) ||
         (g->start_side < 0 && g_zoom_pos >= g->target)) {
@@ -493,12 +553,13 @@ int main(int argc, char **argv) {
   const struct verb *verb = NULL;
   double hold = 1.0;
   int speed = -1;
-  int rx_ms = 1200;
+  long rx_ms = 1200;
   int inherit = 0;
   int json = 0;
   double mult = -1.0;
   int pos_target = -1;
   int rc = 0;
+  long lv;
 
   int opt;
   while ((opt = getopt(argc, argv, "d:t:s:m:p:r:D:Bjh")) != -1) {
@@ -514,31 +575,42 @@ int main(int argc, char **argv) {
       break;
     }
     case 't':
-      hold = atof(optarg);
-      break;
-    case 's':
-      speed = strtol(optarg, NULL, 0);
-      if (speed < 0 || speed > 255) {
-        fprintf(stderr, "speed must fit a byte\n");
+      /* a negative hold would disable the auto-stop and leave the motor
+       * running when the process exits; garbage must not sail through */
+      if (parse_double_opt(optarg, &hold) || hold < 0 || hold > 86400) {
+        fprintf(stderr, "hold must be 0..86400 seconds\n");
         return 2;
       }
       break;
+    case 's':
+      if (parse_int_opt(optarg, &lv) || lv < 0 || lv > 255) {
+        fprintf(stderr, "speed must fit a byte\n");
+        return 2;
+      }
+      speed = (int)lv;
+      break;
     case 'm':
-      mult = atof(optarg);
-      if (mult <= 0) {
-        fprintf(stderr, "multiple must be positive\n");
+      /* atof("-m nan") passes a mere >0 check and lands multiple_to_pos
+       * on its 30 fallback: a full-tele move. Reject non-finite input. */
+      if (parse_double_opt(optarg, &mult) || mult <= 0) {
+        fprintf(stderr, "multiple must be a positive finite number\n");
         return 2;
       }
       break;
     case 'p':
-      pos_target = atoi(optarg);
-      if (pos_target < 1 || pos_target > POS_MAX) {
+      if (parse_int_opt(optarg, &lv) || lv < 1 || lv > POS_MAX) {
         fprintf(stderr, "position must be 1..%d\n", POS_MAX);
         return 2;
       }
+      pos_target = (int)lv;
       break;
     case 'r':
-      rx_ms = atoi(optarg);
+      /* a negative listen window shrinks the session below the
+       * auto-stop deadline — same runaway as a negative hold */
+      if (parse_int_opt(optarg, &rx_ms) || rx_ms < 0 || rx_ms > 86400000L) {
+        fprintf(stderr, "listen window must be 0..86400000 ms\n");
+        return 2;
+      }
       break;
     case 'D':
       dev = optarg;
@@ -571,18 +643,30 @@ int main(int argc, char **argv) {
 
   if (!inherit) {
     struct termios t;
-    if (tcgetattr(fd, &t) == 0) {
-      cfmakeraw(&t);
-      /* 57600 8N1 — verified empirically (115200 makes the MCU deaf:
-       * rx counter flat, zero ACKs; at 57600 it ACKs and streams
-       * reports). The vendor rate also lives in comm_server as the
-       * c_cflag constant B57600|CS8|CREAD|CLOCAL. */
-      cfsetispeed(&t, B57600);
-      cfsetospeed(&t, B57600);
-      tcsetattr(fd, TCSANOW, &t);
+    /* wrong serial settings mean a deaf MCU (it ignores everything at
+     * 115200); a silent tcgetattr/tcsetattr failure would send frames
+     * at unknown rate — refuse to run like that */
+    if (tcgetattr(fd, &t) != 0) {
+      fprintf(stderr, "tcgetattr %s: %s\n", dev, strerror(errno));
+      close(fd);
+      return 1;
+    }
+    cfmakeraw(&t);
+    /* 57600 8N1 — verified empirically (115200 makes the MCU deaf:
+     * rx counter flat, zero ACKs; at 57600 it ACKs and streams
+     * reports). The vendor rate also lives in comm_server as the
+     * c_cflag constant B57600|CS8|CREAD|CLOCAL. */
+    cfsetispeed(&t, B57600);
+    cfsetospeed(&t, B57600);
+    if (tcsetattr(fd, TCSANOW, &t) != 0) {
+      fprintf(stderr, "tcsetattr %s: %s\n", dev, strerror(errno));
+      close(fd);
+      return 1;
     }
   }
-  tcflush(fd, TCIOFLUSH);
+  if (tcflush(fd, TCIOFLUSH) != 0)
+    fprintf(stderr, "tcflush: %s (non-fatal; typical for -B on a non-tty)\n",
+            strerror(errno));
 
   struct session s;
   session_init(&s, fd, json);
@@ -614,27 +698,29 @@ int main(int argc, char **argv) {
     /* ALWAYS stop: budget exhaustion or a dead link must not leave the
      * motor running into an endstop (a tele runaway reached the tele
      * stop once because reports were being consumed by another process) */
-    write(fd, g.stop, 7);
+    if (xwrite(fd, g.stop, 7))
+      rc = 1; /* the safety stop itself failed — say so loudly */
     fprintf(stderr, "final position %d\n", g_zoom_pos);
-    rc = g_zoom_pos != g.target; /* exit 0 on target, 1 on miss/dead link */
+    if (!rc)
+      rc = g_zoom_pos != g.target; /* exit 0 on target, 1 on miss/dead link */
   } else {
     unsigned char f[7];
     build_frame(f, verb, speed);
     print_frame("TX", f, 7, json);
-    write(fd, f, 7);
+    xwrite(fd, f, 7);
 
     struct move_ctx m;
     memset(&m, 0, sizeof(m));
     m.fd = fd;
     m.json = json;
     m.need_stop = (hold > 0 && verb->key != 's');
-    m.hold_ms = (long)(hold * 1000);
+    m.hold_ms = (int64_t)(hold * 1000);
     { const struct verb *stopv = &VERBS[NVERBS - 1];
       build_frame(m.stop_frame, stopv, -1); }
 
-    long total = 600 + m.hold_ms + rx_ms; /* warm-up + hold + tail */
+    int64_t total = 600 + m.hold_ms + (int64_t)rx_ms; /* warm-up + hold + tail */
     if (verb->key == 's')
-      total = 600 + rx_ms;
+      total = 600 + (int64_t)rx_ms;
     session_run(&s, total, move_pump, &m);
   }
 

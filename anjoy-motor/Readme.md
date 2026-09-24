@@ -83,7 +83,9 @@ position typically seen twice:
   position 8, not `0x3B08`.
 * bytes 13-14 = focus position, raw and stable during zoom moves
   (`14 0F` observed). All-`3B` garbage frames appear during link
-  shutdown; decode them to zoom > 30 and the range guard drops them.
+  shutdown; decode them to zoom > 30 and the range guard drops them —
+  they are printed for diagnosis but do not count as feedback, so the
+  goto dead-link watchdog keys on position-valid frames only.
 * single-byte ACKs sprinkle through the stream (`21`, `78`, `3b`…);
   they are not position data.
 
@@ -110,13 +112,20 @@ The loop then:
    the report cadence are invisible to the loop, so an earlier design
    blind-pulsed and oscillated (7 → 12 → runaway);
 4. always ends with a stop frame, even on the 30 s budget expiry or a
-   dead RX link.
+   dead RX link — and the dead-link watchdog fires even before the
+   first report ever arrives (4 s of RX silence from a standing start
+   stops the motor instead of driving it blind for the whole budget).
+   Clock-valid shutdown garbage does not refresh the watchdog.
 
 Verified live in both directions with exact landings and `exit 0`:
 `21→8`, `9→20`, `20→3` (`-p`), `3→15` (`-m 12.5` → position 15), plus a
-`-p 1` park at the wide endstop. A miss or a dead RX link exits 1; the
-session ends as soon as the loop is done (the 30 s budget is a ceiling,
-not a run time), and a stop frame always goes out on the way out.
+`-p 1` park at the wide endstop. A miss, a dead link, or a failed
+safety-stop write exits 1; the session ends as soon as the loop is done
+(the 30 s budget is a ceiling, not a run time), and a stop frame always
+goes out on the way out. All numeric options are strictly parsed —
+negative `-t`/`-r` (which would disable the auto-stop) and `-m nan`
+(which would decode to a full-tele target) are rejected before the
+port is even opened.
 
 ```
 ./anjoy-motor -d T -m 12.5 -j       # zoom to ~12.5x
