@@ -81,9 +81,14 @@ position typically seen twice:
   tele**: wide endstop reads `3B 01` (=1), tele endstop `03 00` (=30).
   The old "16-bit big-endian counter" theory is dead — `3B 3B 08` is
   position 8, not `0x3B08`.
-* bytes 13-14 = focus position, raw and stable during zoom moves
-  (`14 0F` observed). All-`3B` garbage frames appear during link
-  shutdown; decode them to zoom > 30 and the range guard drops them —
+* bytes 13-14 = raw auxiliary field, semantics unknown (drifted
+  `14 0F` → `16 0F` once overnight). It holds still through real zoom
+  AND focus travel — unchanged across a 2.5 s focus jog — so the JSON
+  `focus_pos` key is continuity naming, not true focus feedback: the
+  report carries none. All-`3B` frames (bytes 9..15 drowned in `0x3B`)
+  appear during link shutdown and, on this module, as a one-shot
+  "no lens telemetry" marker emitted while the iris axis is moving;
+  decoded they land zoom > 30 and the range guard drops them —
   they are printed for diagnosis but do not count as feedback, so the
   goto dead-link watchdog keys on position-valid frames only.
 * single-byte ACKs sprinkle through the stream (`21`, `78`, `3b`…);
@@ -130,6 +135,69 @@ port is even opened.
 ```
 ./anjoy-motor -d T -m 12.5 -j       # zoom to ~12.5x
 ./anjoy-motor -d T -p 8 -j -r 800   # zoom to position 8 on the 1..30 scale
+```
+
+## Focus during zoom — no software compensation, verified
+
+The module keeps a usable image across a zoom move with zero focus
+traffic. Wired down with the vendor's own writes captured (LD_PRELOAD
+`write()` logger riding a replacement `comm_server`, `media_server`
+left alive) plus the kernel UART counters sampled at 2 Hz
+(`/proc/tty/driver/ms_uart` tx/rx against the logger's byte count):
+
+* a zoom action is **one** jog frame held until release plus one stop
+  frame — no focus frame is ever sent during or after the move;
+* kernel TX matched the logger's accounted writes byte-exactly across
+  idle, jog and post-jog windows — `comm_server` is the only writer on
+  the wire, so no daemon runs a hidden focus loop (media_server
+  included);
+* kernel RX rises only while a motor actually moves and is flat zero
+  through the post-stop seconds while the image visibly sharpens —
+  the lens is idle and nobody talks to it, so that recovery is the
+  encoder's rate control catching up after the motion burst, not a
+  lens act;
+* there is **no software autofocus**: a lens knocked out of focus with
+  a focus jog stays out of focus (20 s+ observed, zero rescue bytes).
+  What the vendor UI does after zooming is a manual focus jog — the
+  same `-d r`/`-d l` this tool offers.
+
+Zoom sharpness in the first place is optics: the lens is near-parfocal
+and tracks on a stationary focus. "Zoom and stay sharp" therefore needs
+nothing beyond the verbs in this Readme — jog the zoom, then jog focus
+by eye if the scene warrants it.
+
+## Iris — jog only, verified no telemetry
+
+There is no absolute iris control anywhere in the stack, and no iris
+position feedback either:
+
+* the 17-byte reports carry zoom digits plus one opaque auxiliary
+  field (bytes 13-14 — see above); there is no iris feedback. Byte-diffing reports
+  captured around real iris travel (0.8 s open / 1.5 s close with the
+  vendor stack frozen) shows every byte identical before and after —
+  the only event during the move is a single all-`3B` frame. A
+  closed-loop iris is therefore impossible over this link.
+* the vendor surface is binary everywhere: CGI `/ptz_ctrl/iris` takes
+  `-1 or 1`; the 8091 protocol exposes only `irisopen`/`irisclose` jog
+  verbs, which is exactly what the web UI's IrisSmall/IrisLarge paddle
+  buttons drive (press-and-hold, release = `stopPtz`); the local
+  `hik_server` ISAPI emulation adds only `IrisOpenAutoOff`/
+  `IrisCloseAutoOff` jog verbs and an `IrisMode` auto/manual flag. No
+  numeric aperture verb exists in any of them.
+
+Intermediate apertures are therefore pulse-width only: `-d I`/`-d O`
+hold the axis moving for `-t` seconds and a mid-travel stop parks it
+there — the same thing the vendor's own UI does with button hold
+times. Calibrate per lens module. Caveat: an auto-exposure gain swing
+can mask small aperture steps in the video, and on the MTF45-4G_AF the
+image brightness did not measurably move across 2.5 s / 3.5 s pulses in
+a bench test — so before promising stops, confirm on your module that
+the iris axis is physically motorized by watching DoF or brightness
+with exposure fixed.
+
+```
+./anjoy-motor -d I -t 0.8 -j     # iris open 0.8 s, parks mid-travel
+./anjoy-motor -d O -t 0.5 -j     # iris close 0.5 s
 ```
 
 ## Usage
