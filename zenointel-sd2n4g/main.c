@@ -27,6 +27,7 @@
 //         then, on-device:
 //            ./sd2n4g-motor                    interactive jog (l/r pan, u/d tilt, arrows)
 //            ./sd2n4g-motor -d l -x 400 -s 400 pan left 400 steps
+//            ./sd2n4g-motor -d r -a 45         pan right 45 degrees
 //            ./sd2n4g-motor -d u -y 200        tilt up 200 steps
 //            ./sd2n4g-motor -d p               read pin state, no motion (safe w/ app up)
 //            ./sd2n4g-motor -d s               de-energize both motors' coils
@@ -56,19 +57,33 @@ typedef struct {
   const char *name;
   Pin coil[4];      /* [c0,c1,c2,c3] = the 4 phase-table columns */
   int inv;          /* iostepDir: 1 => swap cw/ccw */
-  int steps_max;    /* soft travel bound (cfg "steps") */
+  int steps_max;    /* full mechanical travel (cfg "steps") */
+  int span_deg;     /* angular travel over steps_max (for -a degrees) */
   int phase;        /* current index into the phase table */
   long pos;         /* open-loop step counter */
 } Motor;
 
 /* PAN = cfg motor[1]/"roll": gpio[3,4,72,73], line[0,2,1,3] -> [3,72,4,73]. */
 /* TILT= cfg motor[0]/"pitch": gpio[69,59,58,57], line[0,2,1,3] -> [69,58,59,57]. */
+/* Travel/span from the device cfg + calibration: pan 1640 st = 280deg,           */
+/* tilt 580 st = 90deg (measured: 400 pan half-steps ~= 68deg).                    */
 static Motor motors[2] = {
-  { .name = "pan",  .inv = 0, .steps_max = 1640, .coil = {
+  { .name = "pan",  .inv = 0, .steps_max = 1640, .span_deg = 280, .coil = {
       {0,3,0x100C000Cu}, {9,0,0x100C009Cu}, {0,4,0x100C0010u}, {9,1,0x100C00A0u} } },
-  { .name = "tilt", .inv = 1, .steps_max = 580,  .coil = {
+  { .name = "tilt", .inv = 1, .steps_max = 580,  .span_deg = 90,  .coil = {
       {8,5,0x112C004Cu}, {7,2,0x112C0060u}, {7,3,0x112C0064u}, {7,1,0x112C005Cu} } },
 };
+
+/* degrees -> half-steps for an axis (relative move magnitude). Clamps to the
+ * axis travel BEFORE the cast so a huge/inf input can't overflow long, and maps
+ * NaN to 0. motor_step re-clamps too, but the cast must be made safe first. */
+static long deg_to_steps(const Motor *m, double deg) {
+  if (deg < 0) deg = -deg;
+  double st = deg * m->steps_max / m->span_deg + 0.5;
+  if (!(st >= 0)) return 0;                 /* NaN */
+  if (st > m->steps_max) return m->steps_max;
+  return (long)st;
+}
 
 /* gpioStep.ko half-step / 8-step table (columns = coil[0..3]), extracted verbatim. */
 static const uint8_t HALF[8][4] = {
@@ -236,12 +251,13 @@ static void usage(const char *a0) {
   fprintf(stderr,
     "usage: %s                       interactive jog (l/r pan, u/d tilt, arrows;\n"
     "                                +/- speed; o off; p probe; q quit)\n"
-    "       %s -d <dir> -s <speed> -x <pan steps> -y <tilt steps>\n"
-    "  -d l|r  pan  -/+   (steps from -x)\n"
-    "  -d u|d  tilt +/-   (steps from -y)\n"
+    "       %s -d <dir> -s <speed> [-x <pan steps> | -y <tilt steps> | -a <deg>]\n"
+    "  -d l|r  pan  -/+   (magnitude from -x steps or -a degrees)\n"
+    "  -d u|d  tilt +/-   (magnitude from -y steps or -a degrees)\n"
     "  -d s    stop / de-energize both coils\n"
     "  -d p    probe pin state (read-only)\n"
-    "  -s speed %d..%d (default %d);  steps default %d\n",
+    "  -a <deg> move by degrees instead of steps (pan 280deg, tilt 90deg full travel)\n"
+    "  -s speed %d..%d (default %d);  steps default %d; a single move clamps to travel\n",
     a0, a0, SPEED_MIN, SPEED_MAX, SPEED_DEF, STEP_DEF);
 }
 
@@ -250,18 +266,23 @@ int main(int argc, char **argv) {
   mem_fd = open("/dev/mem", O_RDWR | O_SYNC);
   if (mem_fd < 0) { fprintf(stderr, "open /dev/mem: %s\n", strerror(errno)); return 1; }
 
-  char dir = 0; int speed = SPEED_DEF; long xsteps = 0, ysteps = 0;
-  for (int c; (c = getopt(argc, argv, "d:s:x:y:")) != -1; ) {
+  char dir = 0; int speed = SPEED_DEF; long xsteps = 0, ysteps = 0; double adeg = 0;
+  int have_x = 0, have_y = 0, have_a = 0;
+  char *end;
+  for (int c; (c = getopt(argc, argv, "d:s:x:y:a:")) != -1; ) {
     switch (c) {
       case 'd': dir = optarg[0]; break;
-      case 's': speed = atoi(optarg); break;
-      case 'x': xsteps = atol(optarg); break;
-      case 'y': ysteps = atol(optarg); break;
-      default: usage(argv[0]); return 2;
+      case 's': speed = (int)strtol(optarg, &end, 10); if (*end) goto bad; break;
+      case 'x': xsteps = strtol(optarg, &end, 10); have_x = 1; if (*end) goto bad; break;
+      case 'y': ysteps = strtol(optarg, &end, 10); have_y = 1; if (*end) goto bad; break;
+      case 'a': adeg = strtod(optarg, &end); have_a = 1; if (*end || end == optarg) goto bad; break;
+      default: goto bad;
     }
   }
-  if (xsteps < 0 || ysteps < 0) {
-    fprintf(stderr, "step count must be >= 0\n"); return 2;
+  /* reject negative / non-finite magnitudes rather than moving a default amount */
+  if (xsteps < 0 || ysteps < 0 || adeg < 0 || adeg != adeg /* NaN */ || adeg > 1e6) {
+bad:
+    usage(argv[0]); return 2;
   }
   if (!dir) { jog(SPEED_DEF); return 0; }   /* no -d => interactive jog */
 
@@ -269,15 +290,17 @@ int main(int argc, char **argv) {
     case 'p': probe(); return 0;
     case 's': release_all(); puts("both motors de-energized"); return 0;
     case 'l': case 'r': {
-      Motor *m = &motors[0]; long n = xsteps > 0 ? xsteps : STEP_DEF;
+      Motor *m = &motors[0];
+      long n = have_a ? deg_to_steps(m, adeg) : have_x ? xsteps : STEP_DEF;
       int d = (dir == 'r') ? +1 : -1;
-      motor_init_pins(m); motor_step(m, d, n, speed);
+      motor_init_pins(m); n = motor_step(m, d, n, speed);
       printf("pan %ld steps %s @%d -> pos=%ld\n", n, d>0?"right":"left", speed, m->pos);
       return 0; }
     case 'u': case 'd': {
-      Motor *m = &motors[1]; long n = ysteps > 0 ? ysteps : STEP_DEF;
+      Motor *m = &motors[1];
+      long n = have_a ? deg_to_steps(m, adeg) : have_y ? ysteps : STEP_DEF;
       int d = (dir == 'u') ? +1 : -1;
-      motor_init_pins(m); motor_step(m, d, n, speed);
+      motor_init_pins(m); n = motor_step(m, d, n, speed);
       printf("tilt %ld steps %s @%d -> pos=%ld\n", n, d>0?"up":"down", speed, m->pos);
       return 0; }
     default: usage(argv[0]); return 2;

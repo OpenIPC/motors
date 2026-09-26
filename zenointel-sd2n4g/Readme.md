@@ -47,6 +47,7 @@ make                       # -> sd2n4g-motor-openipc (static musl ARM)
                                     #   +/- speed, o off, p probe, q quit
 ./sd2n4g-motor -d l -x 400 -s 400   # pan left 400 steps @ speed 400
 ./sd2n4g-motor -d r -x 400          # pan right 400 steps
+./sd2n4g-motor -d r -a 45           # pan right 45 degrees (pan 280deg / tilt 90deg full travel)
 ./sd2n4g-motor -d u -y 200          # tilt up 200 steps
 ./sd2n4g-motor -d p                 # probe pin state, no motion (safe with app up)
 ./sd2n4g-motor -d s                 # de-energize both motors
@@ -54,6 +55,7 @@ make                       # -> sd2n4g-motor-openipc (static musl ARM)
 
 CLI follows the repo PTZ convention: `-d <dir> -s <speed> -x <pan steps>
 -y <tilt steps>`, with `l`/`r` = pan, `u`/`d` = tilt, `s` = stop, `p` = probe.
+`-a <deg>` moves by degrees instead of steps (pan 280deg, tilt 90deg full travel).
 
 Direct-register writes take effect regardless of what "owns" the GPIO, so on stock
 the tool moves the motors even with `hunter` running **as long as no PTZ command is
@@ -74,6 +76,7 @@ A reboot restores stock. A full NAND backup exists as the safety net.
   runs are not range-checked against each other. `-d p` shows the held phase.
 - Coil pairing comes from cfg `line=[0,2,1,3]`; if a motor buzzes instead of
   turning on another unit, try the raw GPIO order or the full-step table.
-- `-a <deg>` absolute/relative-by-degrees convenience and a soft-limit clamp
-  (using the travel figures above) are natural next additions.
+- `-a <deg>` relative-by-degrees moves and a per-move soft-limit clamp to the
+  travel figures above are implemented; cross-invocation absolute positioning
+  would need a persisted reference (there is no home sensor).
 - Destined for `~/git/motors` (as `zenointel-sd2n4g/`).
