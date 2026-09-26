@@ -23,7 +23,7 @@
 #
 # There is deliberately no `paths:` filter on the trigger. A workflow filtered
 # out by `paths:` does not run at all, so a required check from it would sit
-# The whole repo is seven C tools and a build takes under a minute, so there is
+# The whole repo is eight C tools and a build takes under a minute, so there is
 # nothing to narrow.
 name: gcc-compat
 
@@ -133,7 +133,7 @@ jobs:
           }
 
           # ARM targets: Xiongmai, HiSilicon, and SigmaStar SoCs.
-          for t in xm-kmotor xm-uart camhi-motor i2c-motor; do
+          for t in xm-kmotor xm-uart camhi-motor i2c-motor zenointel-sd2n4g; do
             build arm-linux-gnueabihf-gcc "$t" "$t/main.c"
           done
           # Both of these link pow(); glibc keeps it in libm (the musl
