@@ -16,7 +16,7 @@ protocol, profiles, state storage, and UART output on a pseudo terminal. The
 automated check is `.github/workflows/gcc-compat.yml`, a **required status
 check** (`GCC Gate`) on `master`. Know precisely what it does and does not cover:
 
-- It cross-compiles six tools on GCC 12 and GCC 14, then builds and tests
+- It cross-compiles seven tools on GCC 12 and GCC 14, then builds and tests
   `pelcodtui` natively. **`an41908a` is excluded**, because it needs the
   proprietary Hi3516CV500 MPP SDK. Changes under `an41908a/` get no CI
   coverage and must be built by hand. A green gate says nothing about them.
@@ -101,7 +101,7 @@ Understanding which pattern a tool uses explains most of its code:
 
 1. **`ioctl` against a vendor kernel module** (`xm-kmotor`, `camhi-motor`, `ingenic-motor`). The module creates `/dev/motor`; the tool is a thin CLI over `ioctl`. The kernel module ships with vendor firmware and must be `insmod`'d with GPIO-pin and max-step parameters *before* the tool works — see each directory's Readme for the exact `insmod`/`modprobe` line, since pin maps are per-camera-model.
 
-2. **Direct bus access from user space** (`i2c-motor`, `i2c-motor/sigmastar-ssc338q`, `an41908a`). No custom kernel module — the tool drives the motor-driver IC itself over I2C SMBus (`/dev/i2c-2`, MS32006 at addr `0x10`) or SPI (`/dev/spidev2.0`, AN41908A) plus sysfs GPIO. `i2c-motor` also needs `devmem` pinmux writes first (documented in its Readme). `i2c-motor/sigmastar-ssc338q` maps `/dev/mem` autonomously to un-gate the motor power rail via RIU register `0x1F223618` (Bank `0x111B` Offset `0x06`).
+2. **Direct bus / register access from user space** (`i2c-motor`, `i2c-motor/sigmastar-ssc338q`, `an41908a`, `zenointel-sd2n4g`). No custom kernel module — the tool drives the motor-driver IC itself over I2C SMBus (`/dev/i2c-2`, MS32006 at addr `0x10`) or SPI (`/dev/spidev2.0`, AN41908A) plus sysfs GPIO. `i2c-motor` also needs `devmem` pinmux writes first (documented in its Readme). `i2c-motor/sigmastar-ssc338q` maps `/dev/mem` autonomously to un-gate the motor power rail via RIU register `0x1F223618` (Bank `0x111B` Offset `0x06`). `zenointel-sd2n4g` has no driver IC at all — it maps `/dev/mem` and bit-bangs a 4-wire stepper head straight on the Goke GK7205V510 PL061 GPIO banks (`0x120B0000 + bank*0x1000`), replaying `gpioStep.ko`'s half-step phase table; open-loop, no home sensor.
 
 3. **Serial protocol over UART** (`xm-uart`). Speaks a Pelco-D variant to a Xiongmai AF module on `/dev/ttyAMA0` at 115200 8N1; interactive keyboard REPL. Note the `AUTO_FOCUS` compile-time switch changes the sync byte from `0xff` to `0xc5`, and system getty must be disabled on that UART.
 
@@ -119,7 +119,7 @@ Do not copy an ioctl constant or command value from one tool into another.
 
 All tools share the shape `-d <direction-char> -s <speed> [-x N] [-y N]`, but the letters mean different things depending on whether the tool moves a camera head or a lens:
 
-- **PTZ tools** (`xm-kmotor`, `ingenic-motor`): `u`/`d`/`l`/`r` = up/down/left/right, `s` = stop, `h` = set position, `g` = steps, `t`/`f` = goto/scan (xm-kmotor), `c`/`b` = cruise/go-back (ingenic-motor).
+- **PTZ tools** (`xm-kmotor`, `ingenic-motor`, `zenointel-sd2n4g`): `u`/`d`/`l`/`r` = up/down/left/right, `s` = stop, `h` = set position, `g` = steps, `t`/`f` = goto/scan (xm-kmotor), `c`/`b` = cruise/go-back (ingenic-motor).
 - **Lens tools** (`camhi-motor`, `i2c-motor`, `i2c-motor/sigmastar-ssc338q`): `u`/`d` = zoom in/out, `l`/`r` = focus −/+, `i` = init (i2c-motor / sigmastar), `s` = stop. `i2c-motor/sigmastar-ssc338q` implements simultaneous parabolic parfocal zoom+focus tracking; `-s` sets speed (1..100 or PPS), `-p` sets explicit PPS, `-n`/`-x` set step counts. Moves are synchronous, so `-d s` returns immediately. Relative moves are gated on calibration established by homing (`home` or `-d i`). It also accepts Web UI `ptz.cgi` format `motor <profile> <h> <v>`.
 
 Speed ranges also differ per driver and are silently clamped: 10 (xm-kmotor), 100 (camhi/i2c), 900 (ingenic-motor, the kernel module's practical ceiling), 16383 PPS (sigmastar-ssc338q).

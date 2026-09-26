@@ -9,6 +9,15 @@ pan/tilt head of Anjoy AF camera modules over their motor-MCU UART
 (Pelco-D-style frames), and decodes the MCU's live position reports.
 Protocol recovered from a live MTF45-4G_AF.
 
+## Zenointel SD-2N-4G pan/tilt
+
+[`zenointel-sd2n4g`](zenointel-sd2n4g/) drives the pan/tilt stepper head of the
+Zenointel SD-2N-4G (Goke GK7205V510) directly over memory-mapped PL061 GPIO — no
+vendor kernel module and no vendor app, so it also runs under OpenIPC. The GPIO
+map, half-step phase table and per-axis config were reverse-engineered from the
+stock firmware (`motor.ko`/`gpioStep.ko`). The lens is fixed — no motorized
+zoom/focus on this model.
+
 ## Pelco-D configuration TUI
 
 [`pelcodtui`](pelcodtui/) is an ncurses interface for Pelco-D PTZ controller
