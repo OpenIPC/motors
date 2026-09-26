@@ -32,9 +32,10 @@
 // Build:  make ms41908-lens-openipc   (OpenIPC musl toolchain; default target)
 // Run on-device:
 //   ms41908-lens             interactive jog (soft travel limits, see below)
-//   ms41908-lens probe       read-only register dump (safe with the streamer up)
+//   ms41908-lens probe       register dump; drives the SPI bus + EN pin, so stop
+//                            Sofia first on stock (OpenIPC: nothing else owns the lens)
 //   ms41908-lens home        motion proof: bounded PI home-seek on both axes
-//   ms41908-lens watchpi N   read-only PI monitor for N s (safe with streamer up)
+//   ms41908-lens watchpi N   read-only PI-pin monitor for N s (safe with streamer up)
 
 #include <errno.h>
 #include <fcntl.h>
@@ -149,12 +150,20 @@ static int poll_done(int bit, int timeout_us) {
  * pads take function 1 (SPI0 is the same pattern at 0x200F0050/54/58). Stock
  * Sofia runs this at lens init; OpenIPC does not, so the tool must, or every
  * SPI read comes back 0. */
-static void plsintr_init(void) {
+/* Minimal SPI1 bring-up needed for ANY transfer: pad functions + clock + the EN
+ * chip-select GPIO. Split out of plsintr_init so read-only probe can set it up on a
+ * fresh OpenIPC boot (pads still GPIO) without the interrupt/VD/PI reconfiguration
+ * that only the motion modes need. */
+static void spi_pads_init(void) {
   mmio_w(0x200F0060, 1); mmio_w(0x200F0064, 1); mmio_w(0x200F0068, 1); /* SPI1 SCLK/SDO/SDI = func 1 */
   mmio_w(0x200F006C, 0);
   mmio_w(0x201C0000, mmio_r(0x201C0000) | 0x80u);                     /* SPI1 clock enable */
   mmio_w(GPIO_DIR(EN_GRP), mmio_r(GPIO_DIR(EN_GRP)) | (1u << EN_PIN)); /* EN output */
   gpio_set(EN_GRP, EN_PIN, false);                                    /* xmspi_disable */
+}
+
+static void plsintr_init(void) {
+  spi_pads_init();
   mmio_w(0x200F0150, 1); mmio_w(0x200F014C, 1);
   for (uint32_t a = 0x20220400; a <= 0x20220410; a += 4)             /* intr type/mask */
     mmio_w(a, mmio_r(a) & ~3u);
@@ -169,19 +178,20 @@ static void plsintr_init(void) {
 
 /* ---- SPI register access (mirrors xmspi_write / xmspi_read) -------------- */
 
-static void spi_xfer(uint8_t *tx, uint8_t *rx) {
+static bool spi_xfer(uint8_t *tx, uint8_t *rx) {
   struct spi_ioc_transfer tr = {
       .tx_buf = (unsigned long)tx, .rx_buf = (unsigned long)rx,
       .len = 3, .speed_hz = PORT_SPEED, .bits_per_word = 8,
   };
   gpio_set(EN_GRP, EN_PIN, true);
-  if (ioctl(spi_fd, SPI_IOC_MESSAGE(1), &tr) < 0)
-    fprintf(stderr, "spi ioctl: %s\n", strerror(errno));
+  int rc = ioctl(spi_fd, SPI_IOC_MESSAGE(1), &tr);
   gpio_set(EN_GRP, EN_PIN, false);
+  if (rc < 0) { fprintf(stderr, "spi ioctl: %s\n", strerror(errno)); return false; }
+  return true;
 }
-static void spi_write(uint8_t addr, uint16_t val) {
+static bool spi_write(uint8_t addr, uint16_t val) {
   uint8_t tx[3] = {addr, val & 0xff, val >> 8}, rx[3] = {0};
-  spi_xfer(tx, rx);
+  return spi_xfer(tx, rx);
 }
 static uint16_t spi_read(uint8_t addr) {
   uint8_t tx[3] = {addr | 0x40, 0, 0}, rx[3] = {0};
@@ -191,29 +201,36 @@ static uint16_t spi_read(uint8_t addr) {
 
 /* ---- MS41908M init (mirrors libxmaf ms419x9_init) ----------------------- */
 
-static void ms419_init(void) {
-  spi_write(0x20, 0x5C02); spi_write(0x22, 0x0001); spi_write(0x27, 0x0001);
-  spi_write(0x23, 0xD0D0); spi_write(0x28, 0xD0D0);
-  spi_write(0x25, 0x0160); spi_write(0x2A, 0x0160); /* zoom/focus PPS */
-  spi_write(0x0B, 0x8480); spi_write(0x21, 0x0087);
+static bool ms419_init(void) {
+  bool w = true; /* bitwise-AND so every write is attempted and errors all print */
+  w &= spi_write(0x20, 0x5C02); w &= spi_write(0x22, 0x0001); w &= spi_write(0x27, 0x0001);
+  w &= spi_write(0x23, 0xD0D0); w &= spi_write(0x28, 0xD0D0);
+  w &= spi_write(0x25, 0x0160); w &= spi_write(0x2A, 0x0160); /* zoom/focus PPS */
+  w &= spi_write(0x0B, 0x8480); w &= spi_write(0x21, 0x0087);
   uint16_t r21 = spi_read(0x21), r20 = spi_read(0x20);
-  printf("MS41908 init: 0x21=%#06x %s, 0x20=%#06x %s\n",
-         r21, r21 == 0x0087 ? "OK" : "FAIL", r20, r20 == 0x5C02 ? "OK" : "FAIL");
+  bool ok = w && r21 == 0x0087 && r20 == 0x5C02;
+  printf("MS41908 init: 0x21=%#06x %s, 0x20=%#06x %s%s\n",
+         r21, r21 == 0x0087 ? "OK" : "FAIL", r20, r20 == 0x5C02 ? "OK" : "FAIL",
+         w ? "" : "  (SPI write error)");
+  return ok;
 }
 
 /* ---- motor moves (full handshake: write ctrl -> clear_isr -> VD_FZ -> poll) */
 
-static void move_axis(uint8_t rgn, int isr_bit, bool dir, int step) {
+static bool move_axis(uint8_t rgn, int isr_bit, bool dir, int step) {
   if (step < 1) step = 1;
   if (step > 63) step = 63;
   uint16_t ctrl = (uint16_t)((4 * step) | CTRL_BASE | (dir ? 0x0100 : 0));
-  spi_write(rgn, ctrl);
+  if (!spi_write(rgn, ctrl)) return false; /* SPI dead: report, don't "advance" */
   clear_isr(isr_bit);
   vd_fz_pulse();
-  if (!poll_done(isr_bit, 60000)) usleep(12000); /* fallback if no done signal */
+  /* The motion-done ISR does not fire on every board (the motor still steps), so a
+   * poll timeout means "no done-signal", not a failed move — settle and return ok. */
+  if (!poll_done(isr_bit, 60000)) usleep(12000);
+  return true;
 }
-static void zoom(bool tele, int step)  { move_axis(REG_ZOOM,  ISR_ZOOM,  tele, step); }
-static void focus(bool far, int step)  { move_axis(REG_FOCUS, ISR_FOCUS, far,  step); }
+static bool zoom(bool tele, int step)  { return move_axis(REG_ZOOM,  ISR_ZOOM,  tele, step); }
+static bool focus(bool far, int step)  { return move_axis(REG_FOCUS, ISR_FOCUS, far,  step); }
 
 static void set_iris(int value) {
   if (value < IRIS_MIN) value = IRIS_MIN;
@@ -228,7 +245,8 @@ static void set_iris(int value) {
  * home level, bounded by the axis travel. A PI transition = physical motion. */
 static int home_seek(const char *name, uint8_t rgn, int isr_bit, int pi_grp,
                      int pi_pin, int home_level, int max_units, int cap) {
-  (void)home_level; (void)max_units;
+  (void)home_level;
+  if (cap > max_units) cap = max_units; /* never sweep past the axis travel into a stop */
   int start = gpio_get(pi_grp, pi_pin);
   printf("%s home-seek: PI start=%d, bidirectional fine sweep (8 microsteps/burst)...\n",
          name, start);
@@ -294,17 +312,21 @@ static void jog_move(bool is_zoom, bool up, int step) {
     printf("%s UNHOMED backstop (%+d) — jog to a stop and press 'o', or 'h' to home\n", ax, *pos);
     return;
   }
-  if (is_zoom) zoom(up, step); else focus(up, step);
+  if (!(is_zoom ? zoom(up, step) : focus(up, step))) {
+    printf("%s move FAILED (SPI) — position not advanced\n", ax);
+    return;
+  }
   *pos += up ? step : -step;
   printf("%s %s  pos %+d/%d%s\n", ax, up ? hi : lo, *pos, max, lens_homed ? "" : "  (UNHOMED)");
 }
 
 static void lens_home(void) { /* bounded seek to the WIDE+NEAR stops = 0 (no PI here) */
   puts("homing: seek to WIDE + NEAR stops to set zero (brief clicking at the stop is normal)...");
-  for (int i = 0; i < ZOOM_MAX + 150; i += 15) zoom(false, 15);
-  z_pos = 0;
-  for (int i = 0; i < FOCUS_MAX + 150; i += 15) focus(false, 15);
-  f_pos = 0;
+  bool ok = true;
+  for (int i = 0; i < ZOOM_MAX + 150 && ok; i += 15) ok = zoom(false, 15);
+  for (int i = 0; i < FOCUS_MAX + 150 && ok; i += 15) ok = focus(false, 15);
+  if (!ok) { puts("homing ABORTED: SPI move failed — lens NOT homed."); return; }
+  z_pos = f_pos = 0;
   lens_homed = 1;
   puts("homed: zoom=0 focus=0. Soft limits active — jog can no longer drive past a stop.");
 }
@@ -333,10 +355,12 @@ int main(int argc, char **argv) {
     return 0;
   }
 
-  if (!strcmp(mode, "probe")) { /* read-only: safe while Sofia is up */
+  if (!strcmp(mode, "probe")) { /* register dump. Drives the shared SPI bus + EN pin,
+                                 * so it is NOT safe alongside stock Sofia — stop Sofia
+                                 * first on stock (on OpenIPC nothing else owns the lens).
+                                 * NOPLS reuses an existing pin setup instead. */
     if (io_open() != 0) return 1;
-    mmio_w(GPIO_DIR(EN_GRP), mmio_r(GPIO_DIR(EN_GRP)) | (1u << EN_PIN));
-    gpio_set(EN_GRP, EN_PIN, false);
+    if (!getenv("NOPLS")) spi_pads_init(); /* so a fresh OpenIPC boot reads non-zero */
     printf("probe: 0x20=%#06x 0x21=%#06x 0x24=%#06x 0x29=%#06x 0x00=%#06x\n",
            spi_read(0x20), spi_read(0x21), spi_read(0x24), spi_read(0x29), spi_read(0x00));
     return 0;
@@ -345,7 +369,9 @@ int main(int argc, char **argv) {
   if (io_open() != 0) return 1;
   if (getenv("NOPLS")) printf("(skipping plsintr_init — using existing pin setup)\n");
   else plsintr_init();
-  ms419_init();
+  if (!ms419_init())
+    fprintf(stderr, "WARNING: MS41908 not responding on SPI — moves will fail and "
+                    "positions will not advance (streamer running? Sofia stopped?)\n");
 
   if (!strcmp(mode, "diag")) { /* instrument one axis to locate the failure */
     int n = argc > 2 ? atoi(argv[2]) : 12;

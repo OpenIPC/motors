@@ -88,9 +88,9 @@ make                       # -> ms41908-lens-openipc (static musl ARM)
 
 ```sh
 ./ms41908-lens             # interactive jog (soft travel limits, keys below)
-./ms41908-lens probe       # read-only register dump (safe with the streamer up)
+./ms41908-lens probe       # register dump — drives the SPI bus + EN pin; on stock, stop Sofia first
 ./ms41908-lens home        # motion proof: bounded PI home-seek on both axes
-./ms41908-lens watchpi 15  # read-only PI monitor for 15 s (safe with streamer up)
+./ms41908-lens watchpi 15  # read-only PI-pin monitor for 15 s (safe with streamer up)
 ./ms41908-lens diag 12     # instrument one zoom axis to locate a stepping failure
 ```
 
@@ -105,9 +105,12 @@ Interactive jog keys:
 
 ## Notes / caveats
 
-- **`probe` and `watchpi` are read-only** and safe to run while the streamer is up; the
-  jog / `home` / `diag` motion modes need exclusive access to the lens (stop Sofia on
-  stock; on OpenIPC just keep majestic running for VD).
+- **`watchpi` is truly read-only** — it only samples the PI input GPIOs — and is safe to
+  run while the streamer is up. **`probe` is not**: it configures the SPI1 pads and toggles
+  the shared **EN** chip-select around every read, so although it commands no motion it can
+  corrupt a concurrent lens transaction. Stop Sofia first before probing on stock firmware
+  (on OpenIPC nothing else owns the lens). The jog / `home` / `diag` motion modes likewise
+  need exclusive access — keep majestic running on OpenIPC for VD.
 - Position is not persisted across invocations — re-zero (`o`/`h`) each run.
 - The `home` PI-seek is a motion *proof* (any PI GPIO transition = physical motion); on
   units where the PI never transitions it reports no motion even though the motor stepped
