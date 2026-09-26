@@ -33,6 +33,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -85,19 +86,26 @@ static int mem_fd = -1;
 #define MAX_PAGES 16
 static struct { uint32_t base; volatile uint8_t *p; } pages[MAX_PAGES];
 
+/* A GPIO/pinmux access that cannot map is unrecoverable for a bare-metal tool —
+ * fail hard rather than silently pretending the coil moved (a partial write set
+ * would leave the motor mid-phase and still report success otherwise). */
+static void die(const char *what, uint32_t a) {
+  fprintf(stderr, "sd2n4g-motor: %s %#x: %s\n", what, a, strerror(errno));
+  exit(1);
+}
 static volatile uint32_t *reg(uint32_t phys) {
   uint32_t base = phys & ~0xFFFu;
   int i;
   for (i = 0; i < MAX_PAGES && pages[i].p; i++)
     if (pages[i].base == base) return (volatile uint32_t *)(pages[i].p + (phys & 0xFFF));
-  if (i == MAX_PAGES) return NULL;
+  if (i == MAX_PAGES) die("page table full for", phys);
   void *m = mmap(NULL, 0x1000, PROT_READ | PROT_WRITE, MAP_SHARED, mem_fd, base);
-  if (m == MAP_FAILED) { fprintf(stderr, "mmap %#x: %s\n", base, strerror(errno)); return NULL; }
+  if (m == MAP_FAILED) die("mmap", base);
   pages[i].base = base; pages[i].p = m;
   return (volatile uint32_t *)(pages[i].p + (phys & 0xFFF));
 }
-static uint32_t rd(uint32_t a) { volatile uint32_t *r = reg(a); return r ? *r : 0; }
-static void wr(uint32_t a, uint32_t v) { volatile uint32_t *r = reg(a); if (r) *r = v; }
+static uint32_t rd(uint32_t a) { return *reg(a); }
+static void wr(uint32_t a, uint32_t v) { *reg(a) = v; }
 
 /* PL061 masked write: the address selects the pin, data carries its bit. */
 static void gpio_set(const Pin *p, int lvl) {
@@ -116,17 +124,33 @@ static void apply_phase(Motor *m) {
   const uint8_t *row = HALF[m->phase & 7];
   for (int i = 0; i < 4; i++) gpio_set(&m->coil[i], row[i]);
 }
+/* Recover the phase index from whatever the coils are currently holding, so a
+ * one-shot invocation continues from the phase a previous run left energized
+ * instead of jumping electrically to phase 0. If the live pattern matches no
+ * table row (coils released, or an unknown state), establish phase 0. */
+static void motor_recover_phase(Motor *m) {
+  uint8_t cur[4];
+  for (int i = 0; i < 4; i++) cur[i] = (uint8_t)gpio_get(&m->coil[i]);
+  for (int p = 0; p < 8; p++) {
+    if (!memcmp(HALF[p], cur, 4)) { m->phase = p; return; }
+  }
+  m->phase = 0; apply_phase(m);        /* unknown -> known starting phase */
+}
 static void motor_init_pins(Motor *m) {
   for (int i = 0; i < 4; i++) gpio_make_output(&m->coil[i]);
-  apply_phase(m);   /* energize current phase (hold) */
+  motor_recover_phase(m);
 }
 static void motor_release(Motor *m) {          /* de-energize all coils */
   for (int i = 0; i < 4; i++) gpio_set(&m->coil[i], 0);
 }
-/* dir: +1 / -1 (before iostepDir); returns steps actually taken. */
+/* dir: +1 / -1 (before iostepDir). Clamps to the axis travel; returns steps taken. */
 static long motor_step(Motor *m, int dir, long steps, int speed) {
   if (speed < SPEED_MIN) speed = SPEED_MIN;
   if (speed > SPEED_MAX) speed = SPEED_MAX;
+  if (steps > m->steps_max) {           /* a single move cannot exceed full travel */
+    fprintf(stderr, "%s: clamping %ld to travel %d steps\n", m->name, steps, m->steps_max);
+    steps = m->steps_max;
+  }
   int d = (m->inv ? -dir : dir) >= 0 ? 1 : -1;
   useconds_t period = (useconds_t)(1000000 / speed / 2);   /* half-step */
   long n = 0;
@@ -160,13 +184,28 @@ static void release_all(void) {
   motor_release(&motors[0]);   motor_release(&motors[1]);
 }
 
+/* Terminal state restored on normal exit AND on catchable termination, so an
+ * interrupted jog never leaves the invoking shell in raw / no-echo mode. */
+static struct termios g_saved_tio;
+static int g_tty_raw = 0;
+static void tty_restore(void) {
+  if (g_tty_raw) { tcsetattr(STDIN_FILENO, TCSANOW, &g_saved_tio); g_tty_raw = 0; }
+}
+static void tty_signal(int sig) { tty_restore(); _exit(128 + sig); }
+
 /* Interactive jog. Keys follow the repo PTZ convention: u/d = tilt, l/r = pan. */
 static void jog(int speed) {
   motor_init_pins(&motors[0]);
   motor_init_pins(&motors[1]);
-  struct termios old, raw;
-  int tty = tcgetattr(STDIN_FILENO, &old) == 0;
-  if (tty) { raw = old; raw.c_lflag &= ~(ICANON | ECHO | ISIG); tcsetattr(STDIN_FILENO, TCSANOW, &raw); }
+  int tty = tcgetattr(STDIN_FILENO, &g_saved_tio) == 0;
+  if (tty) {
+    struct termios raw = g_saved_tio;
+    raw.c_lflag &= ~(ICANON | ECHO | ISIG);
+    atexit(tty_restore);
+    signal(SIGINT, tty_signal); signal(SIGTERM, tty_signal); signal(SIGHUP, tty_signal);
+    tcsetattr(STDIN_FILENO, TCSANOW, &raw);
+    g_tty_raw = 1;
+  }
   printf("jog: l/r = pan, u/d = tilt (arrows too), +/- speed, o off, p probe, q quit.  speed=%d\n",
          speed);
   int burst = 20;
@@ -190,7 +229,7 @@ static void jog(int speed) {
     }
   }
 out:
-  if (tty) tcsetattr(STDIN_FILENO, TCSANOW, &old);
+  tty_restore();
 }
 
 static void usage(const char *a0) {
@@ -220,6 +259,9 @@ int main(int argc, char **argv) {
       case 'y': ysteps = atol(optarg); break;
       default: usage(argv[0]); return 2;
     }
+  }
+  if (xsteps < 0 || ysteps < 0) {
+    fprintf(stderr, "step count must be >= 0\n"); return 2;
   }
   if (!dir) { jog(SPEED_DEF); return 0; }   /* no -d => interactive jog */
 

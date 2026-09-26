@@ -69,6 +69,9 @@ A reboot restores stock. A full NAND backup exists as the safety net.
 
 ## Notes / TODO
 
+- Open-loop with no home sensor: a single move is clamped to the axis travel,
+  but position is not persisted across invocations, so repeated same-direction
+  runs are not range-checked against each other. `-d p` shows the held phase.
 - Coil pairing comes from cfg `line=[0,2,1,3]`; if a motor buzzes instead of
   turning on another unit, try the raw GPIO order or the full-step table.
 - `-a <deg>` absolute/relative-by-degrees convenience and a soft-limit clamp
