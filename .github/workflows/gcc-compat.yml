@@ -133,7 +133,7 @@ jobs:
           }
 
           # ARM targets: Xiongmai, HiSilicon, and SigmaStar SoCs.
-          for t in xm-kmotor xm-uart camhi-motor i2c-motor zenointel-sd2n4g; do
+          for t in xm-kmotor xm-uart camhi-motor i2c-motor zenointel-sd2n4g ms41908-lens; do
             build arm-linux-gnueabihf-gcc "$t" "$t/main.c"
           done
           # Both of these link pow(); glibc keeps it in libm (the musl
