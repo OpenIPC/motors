@@ -33,6 +33,18 @@ timing.** So a streamer must be running for the motors to actually turn:
 SPI *register* access (init, `probe`, iris DAC writes) works with no streamer at all;
 only the stepper motion depends on VD.
 
+## Autofocus
+
+This tool only *jogs* focus — it does not autofocus. **[AUTOFOCUS.md](AUTOFOCUS.md)**
+documents the stock firmware's contrast-AF algorithm, reverse-engineered from
+`libxmaf.so`: a bracket-and-return state machine (find direction → coarse accelerate →
+detect peak → fine 3-point bracket → drive back to the recorded best position → idle),
+with the exact step sizes, per-frame settle gating, hysteresis and convergence bounds.
+Read it before re-implementing AF for this lens (e.g. in an OpenIPC/majestic plugin) — the
+non-obvious parts (settle 3–4 frames before trusting a focus value; return to the *recorded*
+best rather than stopping where the peak was seen; bound the hunt to 2 reversals) are what
+separate a lens that settles sharp from one that hunts and clicks forever.
+
 ## Hardware (reverse-engineered from the stock firmware)
 
 | Signal | Wiring | Notes |
