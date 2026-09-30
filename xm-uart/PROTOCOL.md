@@ -233,10 +233,10 @@ The sharpest point was within about 0.6 s of drive of the settled position in ev
 
 | | stock zoom, live `A5` | host zoom, no `A5` |
 |---|---|---|
-| X2.0 | 47%, 38% | 36%, 25% |
-| X4.0 | 43%, 44% | 37%, 36% |
+| X2.0 | 45%, 36% | 36%, 34% |
+| X4.0 | 47%, 46% | 37%, 35% |
 
-With the stream the board settled a little closer, by about 8 points. It was nowhere near the crest either way, and the offsets were the same size. Whatever the stream carries, the board does not autofocus on it. The small edge is not explained: it could come from the stream, or from the stock firmware's slightly different zoom timing (`captures/tracking-stockzoom.json`).
+With the stream the board settled a little closer, by 0–11 points (a second session gave the same picture: 47/38% against 36/25% at X2.0, 43/44% against 37/36% at X4.0). It was nowhere near the crest either way, and the offsets were the same size. Whatever the stream carries, the board does not autofocus on it. The small edge is not explained: it could come from the stream, or from the stock firmware's slightly different zoom timing (`captures/tracking-stockzoom.json`).
 
 **What a host should do.** Send zoom only, and let the board track. After the stop, wait ~10 s, then run a contrast search in a window around the current focus. Start with ±1 s and widen once if no crest is found, for a subject much nearer than the scene the board's curve suits. Take up the 0.45–0.7 s backlash before trusting the first steps of each reversal. Don't try to drive a parallel "focus-follows-zoom" curve from the host: the board already does it, and it ignores combined frames. This is the same split as a Sony FCB block module's internal focus trace with *Zoom Trigger AF*, or ONVIF's `OnceAfterMove` focus mode.
 
