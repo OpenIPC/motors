@@ -28,7 +28,8 @@ uv run uart-bridge inject --replay stock.jsonl  # host acts as camera (stop the 
 uv run uart-bridge inject --frame a52e9eea2662efae --rate 20 --duration 2
 ```
 
-- If stdin is a terminal while `bridge` runs, each line you type (then Enter) is stored in the log as a timestamped mark, for example `pan left pressed`.
+- While `bridge` runs, each line on stdin is stored in the log as a timestamped mark, for example `pan left pressed`. A line of the form `!<hex>` is sent to the PTZ board as a probe and logged as `h2p`. A probe waits for the end of any camera frame in flight, so it never splices into one. For example, xm-uart's zoom-in then stop:
+  `( sleep 2; echo '!c50100200000215c'; sleep .5; echo '!c50100000000015c'; sleep 2 ) | uv run uart-bridge bridge --duration 6`
 - `bridge` and `inject` open the ports exclusively and set the FTDI latency timer to 1 ms through sysfs, using `--latency` (0 leaves it alone). The default is 16 ms, which makes every timestamp late by up to 16 ms.
 
 ### Two identical FT232R adapters
@@ -42,11 +43,11 @@ Both FT232R adapters report the same serial number (`A5069RR4`), so `/dev/serial
 The first line is a header: `{"type":"header","version":1,"wall":...,"git":...,"mode":...}`, followed by the ports, baud rates and your note. After that there is one record per `read()`:
 
 ```
-{"t": <ns since start>, "d": "c2p" | "p2c", "x": "<hex>"}
+{"t": <ns since start>, "d": "c2p" | "p2c" | "h2p", "x": "<hex>"}
 {"t": <ns since start>, "d": "mark", "note": "..."}
 ```
 
-`c2p` is camera → PTZ board. Record boundaries are read boundaries, not frame boundaries.
+`c2p` is camera → PTZ board, `p2c` is PTZ board → camera, and `h2p` is a probe the host injected. Record boundaries are read boundaries, not frame boundaries.
 
 ## What `diff` compares
 
@@ -67,4 +68,6 @@ Status is in `src/uart_bridge/codec.py`.
 - **Bytes 3–6:** scrambled together with the counter, not decoded yet. The two low bits of byte 6 flip for single frames.
 - **Byte 7:** changes in every frame.
 
-The PTZ board sent nothing back during a 60 s idle bridge run.
+When the camera receives zoom reports, the low byte of its `A5` frames changes every frame, until about 2 s after the zoom stops. That looks like the camera's autofocus loop.
+
+The PTZ board **does not answer `A5` frames**, not even xm-uart's `init[]`. It does answer the XM Pelco-D variant `C5|FF addr c1 c2 d1 d2 ck 5C`, where `ck = sum % 100`. While the zoom moves, it replies with `EF 01 <type> <len> <payload>`. For type 00 the payload is `04 03 2F 2E "X1.6 "`, a zoom-ratio report. An idle camera sends only `A5` frames, so an idle capture has no `p2c` traffic, and that is expected.

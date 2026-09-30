@@ -148,3 +148,63 @@ def test_counter_unscramble_is_monotonic_on_captured_sequence():
     seq = "2e 29 28 2b 2a 35 34 37 36 31 30 33 32 3d 3c 3f 3e 39 38 3b 3a 05 04 07 06 01 00 03 02 0d 0c 0f 0e 09 08 0b 0a 15 14 17 16 11 10 13 12 1d 1c 1f 1e 19 18 1b 1a 65 64 67 66 61 60 63 62"
     ns = [codec.counter(bytes([0xA5, int(b, 16)])) for b in seq.split()]
     assert ns == list(range(0x0B, 0x0B + len(ns)))
+
+
+REPLY = bytes.fromhex("ef01000904032f2e58312e3320")  # captured: "X1.3 "
+ZOOM_IN = bytes.fromhex("c50100200000215c")
+
+
+def test_ptz_reply_framed_across_byte_sized_reads():
+    from uart_bridge.framing import PTZ_RULES
+    f = Framer(PTZ_RULES)
+    out = []
+    for i, b in enumerate(REPLY + REPLY[:3]):
+        out += f.feed(i, bytes([b]))
+    assert out == [Frame(len(REPLY) - 1, REPLY)]
+    assert f.pending() == REPLY[:3]
+
+
+def test_cam_framer_takes_pelco_and_a5_and_rejects_bad_end_byte():
+    f = Framer()
+    bad = bytes.fromhex("c5010020000021ff")
+    assert f.feed(0, ZOOM_IN + IDLE[0] + bad + IDLE[1]) == [
+        Frame(0, ZOOM_IN), Frame(0, IDLE[0]), Junk(0, bad), Frame(0, IDLE[1])]
+
+
+def test_codec_decodes_pelco_and_replies():
+    from uart_bridge import codec
+    d = codec.decode(ZOOM_IN)
+    assert d.ok and d.fields["actions"] == ["zoom+"] and d.text == "pelco addr=1 zoom+"
+    assert codec.decode(bytes.fromhex("c50100000000015c")).text == "pelco addr=1 stop"
+    assert "!cksum" in codec.decode(bytes.fromhex("c50100200000015c")).text
+    r = codec.decode(REPLY)
+    assert r.fields["zoom"] == "X1.3" and r.fields["type"] == 0
+    assert codec.decode(bytes.fromhex("ef01020101")).text == "reply night"
+
+
+def test_bridge_probe_waits_for_camera_frame_boundary():
+    cam_m, cam_path, cam_s = pty_port()
+    ptz_m, ptz_path, ptz_s = pty_port()
+    ctl_r, ctl_w = os.pipe()
+    cam = bridge.open_port(cam_path, 115200)
+    ptz = bridge.open_port(ptz_path, 115200)
+    log = io.StringIO()
+    stopper = bridge.Stopper()
+    th = threading.Thread(target=bridge.run, args=(cam, ptz, LogWriter(log, {}), stopper),
+                          kwargs={"control": ctl_r})
+    th.start()
+    try:
+        os.write(cam_m, IDLE[0][:3])          # camera frame in flight
+        assert read_exact(ptz_m, 3) == IDLE[0][:3]
+        os.write(ctl_w, b"pan test\n!" + ZOOM_IN.hex().encode() + b"\n")
+        time.sleep(0.005)
+        os.write(cam_m, IDLE[0][3:])          # camera finishes its frame
+        got = read_exact(ptz_m, 5 + len(ZOOM_IN))
+        assert got == IDLE[0][3:] + ZOOM_IN   # probe after, not inside, the frame
+    finally:
+        stopper.stop = True
+        th.join(2)
+    assert '"d":"mark","note":"pan test"' in log.getvalue()
+    assert f'"d":"h2p","x":"{ZOOM_IN.hex()}"' in log.getvalue()
+    for fd in (cam_m, cam_s, ptz_m, ptz_s, ctl_r, ctl_w):
+        os.close(fd)

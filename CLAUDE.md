@@ -137,10 +137,13 @@ On top of that it implements **contrast-based autofocus** in a background pthrea
 Python (`uv run …`), not cross-compiled and not covered by the GCC gate; its
 tests are `cd uart-bridge && uv run pytest` (pty pairs, no hardware). It runs on
 a lab host wired camera-UART ↔ host ↔ PTZ-board-UART and records JSONL captures.
-`codec.py` holds what is known about the stock Xiongmai camera→PTZ frames
-(`A5 <counter^0x25> 9E …`, 20 frames/s) — the same family as `xm-uart`'s
-`init[]`. Keep `codec.key()` consistent with what `diff` should treat as
-meaningful.
+`codec.py` holds what is known about the three frame types on that link: the
+camera's scrambled `A5 <counter^0x25> 9E …` stream (20 frames/s, the same
+family as `xm-uart`'s `init[]`, never answered by the board), the XM Pelco-D
+`C5 … 5C` commands the board does answer, and its `EF 01 type len payload`
+replies (zoom reports `"X1.6 "`). An idle capture has no PTZ→camera bytes;
+that is normal, not a dead link. Keep `codec.key()` consistent with what
+`diff` should treat as meaningful.
 
 ## `api/` — design only, nothing implemented
 

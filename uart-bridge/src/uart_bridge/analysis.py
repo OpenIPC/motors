@@ -6,12 +6,15 @@ import difflib
 from dataclasses import dataclass
 
 from . import codec
-from .framing import Frame, Framer
-from .log import C2P, MARK, P2C, Record
+from .framing import CAM_RULES, PTZ_RULES, Frame, Framer
+from .log import C2P, H2P, MARK, P2C, Record
 
-# The PTZ board's reply format is not known yet; frame it the same way and let
-# anything that does not fit fall out as junk.
-FRAMERS = {C2P: Framer, P2C: Framer}
+RULES = {C2P: CAM_RULES, H2P: CAM_RULES, P2C: PTZ_RULES}
+DIRECTIONS = (C2P, H2P, P2C)
+
+
+def framers() -> dict[str, Framer]:
+    return {d: Framer(r) for d, r in RULES.items()}
 
 
 @dataclass
@@ -24,16 +27,16 @@ class Event:
 
 
 def events(records: list[Record]) -> list[Event]:
-    framers = {d: f() for d, f in FRAMERS.items()}
+    fr = framers()
     out: list[Event] = []
     for r in records:
         if r.d == MARK:
             out.append(Event(r.t, MARK, "mark", note=r.note))
             continue
-        for item in framers[r.d].feed(r.t, r.data):
+        for item in fr[r.d].feed(r.t, r.data):
             kind = "frame" if isinstance(item, Frame) else "junk"
             out.append(Event(item.t, r.d, kind, item.data))
-    for d, f in framers.items():
+    for d, f in fr.items():
         if f.pending():
             out.append(Event(records[-1].t if records else 0, d, "junk", f.pending()))
     return out
@@ -42,9 +45,7 @@ def events(records: list[Record]) -> list[Event]:
 def key_of(ev: Event) -> str:
     if ev.kind == "junk":
         return "junk:" + ev.data.hex(" ")
-    if ev.d == C2P:
-        return codec.key(ev.data)
-    return ev.data.hex(" ")
+    return codec.key(ev.data)
 
 
 @dataclass
@@ -73,18 +74,18 @@ class Summary:
     frames: dict
     junk_bytes: dict
     duration_s: float
-    c2p_rate: float
-    c2p_period_ms: tuple[float, float, float]  # min, mean, max between frame completions
+    c2p_rate: float  # of A5 frames, the camera's periodic stream
+    c2p_period_ms: tuple[float, float, float]  # min, mean, max between A5 frames
 
 
 def summarize(evs: list[Event]) -> Summary:
-    frames = {C2P: 0, P2C: 0}
-    junk = {C2P: 0, P2C: 0}
+    frames = dict.fromkeys(DIRECTIONS, 0)
+    junk = dict.fromkeys(DIRECTIONS, 0)
     ts: list[int] = []
     for ev in evs:
         if ev.kind == "frame":
             frames[ev.d] += 1
-            if ev.d == C2P:
+            if ev.d == C2P and ev.data[0] == 0xA5:
                 ts.append(ev.t)
         elif ev.kind == "junk":
             junk[ev.d] += len(ev.data)
@@ -114,7 +115,7 @@ def diff(evs_a: list[Event], evs_b: list[Event], tolerance: int = 3,
     dropped unless `keep_edges`.
     """
     out: list[Divergence] = []
-    for d in (C2P, P2C):
+    for d in DIRECTIONS:
         sa, sb = segments(evs_a, d), segments(evs_b, d)
         sm = difflib.SequenceMatcher(a=[s.key for s in sa], b=[s.key for s in sb], autojunk=False)
         ops = sm.get_opcodes()

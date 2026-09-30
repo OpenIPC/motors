@@ -3,10 +3,11 @@
 Line 1 is a header record:
     {"type": "header", "version": 1, "wall": "...", "mode": "bridge", ...}
 Every following line is one of:
-    {"t": <ns since start>, "d": "c2p" | "p2c", "x": "<hex bytes>"}   data
+    {"t": <ns since start>, "d": "c2p" | "p2c" | "h2p", "x": "<hex>"}   data
     {"t": <ns since start>, "d": "mark", "note": "..."}                 annotation
 
-"c2p" is camera -> PTZ board, "p2c" is PTZ board -> camera. One data record
+"c2p" is camera -> PTZ board, "p2c" is PTZ board -> camera, "h2p" is a frame
+the host itself sent to the PTZ board while bridging (a probe). One data record
 holds whatever a single read() returned, so record boundaries are USB/driver
 artefacts, not frame boundaries; framing.py reassembles frames.
 """
@@ -23,6 +24,7 @@ from typing import IO, Iterator
 FORMAT_VERSION = 1
 C2P = "c2p"
 P2C = "p2c"
+H2P = "h2p"  # injected by the host into the PTZ side during a bridge run
 MARK = "mark"
 
 

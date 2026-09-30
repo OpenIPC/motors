@@ -8,12 +8,12 @@ import sys
 from pathlib import Path
 
 from . import analysis, codec
-from .framing import Frame, Framer
-from .log import C2P, MARK, P2C, LogWriter, read_log
+from .framing import Frame
+from .log import C2P, H2P, MARK, P2C, LogWriter, read_log
 
 DEFAULT_CAM = "/dev/ttyUSB0"
 DEFAULT_PTZ = "/dev/ttyUSB1"
-ARROW = {C2P: "cam->ptz", P2C: "ptz->cam"}
+ARROW = {C2P: "cam->ptz", P2C: "ptz->cam", H2P: "host->ptz"}
 
 
 def fmt_t(t: int) -> str:
@@ -21,16 +21,16 @@ def fmt_t(t: int) -> str:
 
 
 class Printer:
-    """Prints frames as they arrive. With `collapse`, a c2p frame is printed
-    only when its key() changes; the repeat count of the previous one is
-    shown on the same line."""
+    """Prints frames as they arrive. With `collapse`, a frame is printed only
+    when its key() differs from the previous frame in the same direction; the
+    repeat count of that previous frame is shown on the same line."""
 
     def __init__(self, collapse: bool = True, out=sys.stdout):
         self.collapse = collapse
         self.out = out
-        self.framers = {C2P: Framer(), P2C: Framer()}
-        self.last_key: str | None = None
-        self.repeat = 0
+        self.framers = analysis.framers()
+        self.last_key: dict[str, str] = {}
+        self.repeat: dict[str, int] = {}
 
     def data(self, t: int, d: str, data: bytes) -> None:
         for item in self.framers[d].feed(t, data):
@@ -40,16 +40,13 @@ class Printer:
                 self.line(item.t, d, f"junk {item.data.hex(' ')}")
 
     def frame(self, t: int, d: str, data: bytes) -> None:
-        if d == C2P:
-            k = codec.key(data)
-            if self.collapse and k == self.last_key:
-                self.repeat += 1
-                return
-            prev = f"  (prev x{self.repeat + 1})" if self.collapse and self.last_key else ""
-            self.last_key, self.repeat = k, 0
-            self.line(t, d, f"{data.hex(' ')}  {codec.decode(data).text}{prev}")
-        else:
-            self.line(t, d, data.hex(" "))
+        k = codec.key(data)
+        if self.collapse and k == self.last_key.get(d):
+            self.repeat[d] += 1
+            return
+        prev = f"  (prev x{self.repeat[d] + 1})" if self.collapse and d in self.last_key else ""
+        self.last_key[d], self.repeat[d] = k, 0
+        self.line(t, d, f"{data.hex(' ')}  {codec.decode(data).text}{prev}")
 
     def mark(self, t: int, note: str) -> None:
         print(f"{fmt_t(t)}  ---- {note}", file=self.out)
@@ -71,7 +68,9 @@ def open_log(path: Path | None, mode: str):
 
 def print_stats(stats, path: Path) -> None:
     print(f"\nlog: {path}", file=sys.stderr)
-    for d in (C2P, P2C):
+    for d in (C2P, P2C, H2P):
+        if d == H2P and not stats.reads[d]:
+            continue
         print(f"  {ARROW[d]}: {stats.bytes[d]} bytes in {stats.reads[d]} reads", file=sys.stderr)
 
 
@@ -93,12 +92,14 @@ def cmd_bridge(a: argparse.Namespace) -> int:
         stopper = bridge.Stopper()
         stopper.install()
         printer = None if a.quiet else Printer(collapse=not a.all)
-        marks = bridge.stdin_marks()
+        control = None if a.no_stdin else sys.stdin.fileno()
         print(f"bridging {a.cam} <-> {a.ptz}, logging to {path}"
-              + ("; type a line + Enter to add a mark" if marks else ""), file=sys.stderr)
+              + ("; a line on stdin adds a mark, !<hex> sends a probe to the PTZ board"
+                 if control is not None else ""), file=sys.stderr)
         stats = bridge.run(cam, ptz, writer, stopper,
                            on_data=printer.data if printer else None,
-                           marks=marks, duration=a.duration)
+                           control=control, duration=a.duration,
+                           on_mark=printer.mark if printer else None)
     cam.close()
     ptz.close()
     print_stats(stats, path)
@@ -148,8 +149,8 @@ def cmd_decode(a: argparse.Namespace) -> int:
             printer.data(r.t, r.d, r.data)
     s = analysis.summarize(analysis.events(records))
     lo, mean, hi = s.c2p_period_ms
-    print(f"# {s.duration_s:.1f}s  frames c2p={s.frames[C2P]} p2c={s.frames[P2C]}  "
-          f"junk bytes c2p={s.junk_bytes[C2P]} p2c={s.junk_bytes[P2C]}  "
+    print(f"# {s.duration_s:.1f}s  frames c2p={s.frames[C2P]} p2c={s.frames[P2C]} h2p={s.frames[H2P]}  "
+          f"junk bytes c2p={s.junk_bytes[C2P]} p2c={s.junk_bytes[P2C]} h2p={s.junk_bytes[H2P]}  "
           f"c2p rate={s.c2p_rate:.2f}/s period min/mean/max={lo:.1f}/{mean:.1f}/{hi:.1f} ms")
     return 0
 
@@ -188,6 +189,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="FTDI latency timer in ms, set via sysfs (0 = leave as is; default 1)")
     b.add_argument("--quiet", action="store_true", help="no live output")
     b.add_argument("--all", action="store_true", help="print every frame, not only changes")
+    b.add_argument("--no-stdin", action="store_true",
+                   help="ignore stdin (no marks, no probes)")
     b.set_defaults(func=cmd_bridge)
 
     i = sub.add_parser("inject", help="act as the camera: send frames to the PTZ board")
@@ -209,7 +212,7 @@ def build_parser() -> argparse.ArgumentParser:
     d = sub.add_parser("decode", help="print an annotated timeline of a capture")
     d.add_argument("file", type=Path)
     d.add_argument("--all", action="store_true", help="print every frame, not only changes")
-    d.add_argument("--dir", choices=("both", C2P, P2C), default="both")
+    d.add_argument("--dir", choices=("both", C2P, P2C, H2P), default="both")
     d.set_defaults(func=cmd_decode)
 
     f = sub.add_parser("diff", help="compare two captures; exit 1 on divergence")
