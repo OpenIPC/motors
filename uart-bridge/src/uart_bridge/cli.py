@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import gzip
 import math
 import os
 import sys
@@ -83,6 +84,9 @@ def open_log(path: Path | None, mode: str):
     path = path or default_log(mode)
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
+        # A .gz name gets a real gzip file, since read_log() decides by the suffix.
+        if str(path).endswith(".gz"):
+            return path, gzip.open(path, "xt")
         return path, open(path, "x")
     except FileExistsError:
         raise SystemExit(f"{path} already exists; not overwriting a capture")

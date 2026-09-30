@@ -636,3 +636,16 @@ def test_read_log_reads_gzipped_captures(tmp_path):
         w.data(10, C2P, IDLE[0])
     header, recs = read_log(p)
     assert header["mode"] == "test" and recs[0].data == IDLE[0]
+
+
+def test_cli_gz_capture_round_trips(tmp_path):
+    import gzip
+    from uart_bridge.cli import open_log
+    p = tmp_path / "cap.jsonl.gz"
+    path, fp = open_log(p, "bridge")
+    with fp:
+        LogWriter(fp, {"mode": "bridge"}).data(5, C2P, ZOOM_IN)
+    with gzip.open(p, "rb") as g:                      # really compressed
+        assert g.read(1) == b"{"
+    header, recs = read_log(p)
+    assert header["mode"] == "bridge" and recs[0].data == ZOOM_IN
