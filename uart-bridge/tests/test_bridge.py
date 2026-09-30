@@ -493,3 +493,28 @@ def test_inject_sends_on_abort_when_stopped_early():
     assert read_exact(ptz_m, 8, timeout=0.5) == stop
     os.close(ptz_m)
     os.close(ptz_s)
+
+
+def test_on_abort_completes_a_partial_frame_first():
+    ptz_m, ptz_path, ptz_s = pty_port()
+    ptz = bridge.open_port(ptz_path, 115200)
+    stop = bytes.fromhex("c50100000000015c")
+    stopper = bridge.Stopper()
+    sched = [(0, ZOOM_IN + b"\xa5"), (5_000_000_000, stop)]   # a lone A5 left on the wire
+    th = threading.Thread(target=inject.run, args=(ptz, sched, LogWriter(io.StringIO(), {}), stopper),
+                          kwargs={"on_abort": stop})
+    th.start()
+    assert read_exact(ptz_m, 9) == ZOOM_IN + b"\xa5"
+    stopper.stop = True
+    th.join(2)
+    assert read_exact(ptz_m, 15, timeout=0.5) == bytes(7) + stop   # frame completed, then stop
+    os.close(ptz_m)
+    os.close(ptz_s)
+
+
+def test_on_abort_hex_is_validated_by_the_parser():
+    import pytest
+    from uart_bridge.cli import build_parser
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["inject", "--frame", "c5", "--on-abort", "zz"])
+    assert build_parser().parse_args(["inject", "--frame", "c5", "--on-abort", "c501"]).on_abort == b"\xc5\x01"

@@ -60,12 +60,24 @@ def run(
     t0 = time.monotonic_ns()
     i = 0
     end = None
+    # Bytes still owed to the board's current frame: its parser takes any A5
+    # or C5 as the start of an 8-byte frame, with no timeout (PROTOCOL.md).
+    owed = 0
+
+    def track(data: bytes) -> None:
+        nonlocal owed
+        for b in data:
+            if owed:
+                owed -= 1
+            elif b in (0xA5, 0xC5):
+                owed = 7
     try:
         while not stopper.stop:
             now = time.monotonic_ns() - t0
             while i < len(schedule) and schedule[i][0] <= now:
                 data = schedule[i][1]
                 ptz.write(data)
+                track(data)
                 t = time.monotonic_ns() - t0  # when it was written, not when it was due
                 writer.data(t, C2P, data)
                 stats.bytes[C2P] += len(data)
@@ -90,10 +102,14 @@ def run(
                         on_data(t, P2C, data)
     finally:
         if on_abort and i < len(schedule):
-            ptz.write(on_abort)
+            # A partial frame on the wire would swallow the abort frame, so
+            # complete it first (with zero bytes, which start nothing).
+            pad = bytes(owed)
+            ptz.write(pad + on_abort)
             t = time.monotonic_ns() - t0
-            writer.mark(t, f"stopped with {len(schedule) - i} writes pending; sent on-abort frame")
-            writer.data(t, C2P, on_abort)
+            writer.mark(t, f"stopped with {len(schedule) - i} writes pending; sent on-abort frame"
+                           + (f" after {len(pad)} padding bytes" if pad else ""))
+            writer.data(t, C2P, pad + on_abort)
         sel.close()
         writer.flush()
     return stats

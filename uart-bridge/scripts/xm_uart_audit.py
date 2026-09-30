@@ -366,8 +366,12 @@ def cmd_focusdir(a) -> None:
     where each target is sharpest: sweeping nearer, far targets peak before
     near ones. The sweep is repeated in reverse and again forwards, so a
     physical effect has to flip sign with the direction."""
-    near = dict(parse_target(t) for t in a.near)
-    far = dict(parse_target(t) for t in a.far)
+    parsed = [parse_target(t) for t in a.near + a.far]
+    names = [n for n, _ in parsed]
+    if len(set(names)) != len(names):
+        raise SystemExit(f"target names must be unique: {names}")
+    near = dict(parsed[:len(a.near)])
+    far = dict(parsed[len(a.near):])
     targets = {**near, **far}
     # Pre-flight, before the lens moves: the camera delivers frames and every
     # target box fits inside them.
@@ -434,9 +438,12 @@ def cmd_restore(a) -> None:
             raise SystemExit(f"zoom {end} end stop reached near X{last}; X{a.zoom} is out of range")
         raise SystemExit("the board stopped sending zoom reports in both directions")
 
-    z = pulse("restore-probe", ZOOM_IN, hold=REPORT_S)
+    # Where are we? Probe toward tele; at the tele end stop that is silent,
+    # so probe toward wide instead and start from that report.
+    z = pulse("restore-probe", ZOOM_IN, hold=REPORT_S) or \
+        pulse("restore-probe-wide", ZOOM_OUT, hold=REPORT_S)
     if not z:
-        z = confirm_silence("probe", ZOOM_IN, "?")
+        raise SystemExit("no zoom reports from the board in either direction")
     for i in range(40):
         now = z[-1]
         if abs(now - a.zoom) < 0.05:
@@ -457,6 +464,13 @@ def cmd_restore(a) -> None:
     raise SystemExit(f"gave up at X{z[-1]}")
 
 
+def positive_int(text: str) -> int:
+    v = int(text)
+    if v <= 0:
+        raise argparse.ArgumentTypeError(f"must be > 0, got {v}")
+    return v
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -475,7 +489,7 @@ def main() -> None:
     fd.add_argument("--near", action="append", metavar="NAME=X,Y,R",
                     default=None, help="near target box centre and half-size (repeatable)")
     fd.add_argument("--far", action="append", metavar="NAME=X,Y,R", default=None)
-    fd.add_argument("--steps", type=int, default=30)
+    fd.add_argument("--steps", type=positive_int, default=30)
     fd.add_argument("--step", type=float, default=0.1, help="focus pulse per step, s")
     fd.add_argument("--away", type=float, default=1.5, help="initial defocus, s")
     sub.add_parser("accept").set_defaults(func=cmd_accept)
