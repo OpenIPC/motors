@@ -35,6 +35,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -305,7 +306,8 @@ def exp_stockzoom(b: Board) -> dict:
             hold = LEVELS[level]
             for mode in ("stock, A5 live", "host, no A5"):
                 if mode.startswith("stock"):
-                    br = A.Bridge(f"captures/trk-{b.name}-stockzoom.jsonl", "stock zoom, A5 live")
+                    br = A.Bridge(f"captures/trk-{b.name}-stockzoom-{level}-{rep}.jsonl",
+                                  f"stock zoom to {level}, A5 live, rep {rep}")
                     try:
                         time.sleep(2)
                         cam = A.Dvrip(STOCK, br)
@@ -348,6 +350,7 @@ def run(boards: list[Board], name: str) -> list[str]:
             # login that fails, and in a worker thread it would vanish silently)
             results[b.name] = {"error": f"{type(e).__name__}: {e}"}
             say(b, "FAILED", results[b.name]["error"])
+            traceback.print_exc()
 
     threads = [threading.Thread(target=one, args=(b,), name=b.name) for b in boards]
     for t in threads:
@@ -383,8 +386,11 @@ def main() -> None:
     failed: list[str] = []
     for name in (everything if "all" in a.experiment else a.experiment):
         failed += [f"{name}: {n}" for n in run(boards, name)]
-    for b in boards:  # leave every lens in a known state
-        b.pulse("end-wide", A.ZOOM_OUT, WIDE_S)
+    for b in boards:  # leave every lens in a known state, each one whatever the others do
+        try:
+            b.pulse("end-wide", A.ZOOM_OUT, WIDE_S)
+        except (Exception, SystemExit) as e:
+            failed.append(f"reset: {b.name} ({type(e).__name__}: {e})")
     print("done; the lenses are left wide (`xm_uart_audit.py restore` zooms the host's board back)", flush=True)
     if failed:
         raise SystemExit("failed: " + ", ".join(failed))
