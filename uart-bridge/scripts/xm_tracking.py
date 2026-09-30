@@ -339,7 +339,8 @@ EXPERIMENTS = {"zoom": exp_zoom, "offset": exp_offset, "settle": exp_settle, "co
 
 
 def run(boards: list[Board], name: str) -> list[str]:
-    """Run one experiment on every board in parallel; returns the boards that failed."""
+    """Run one experiment on every board in parallel; returns the boards whose
+    results are incomplete (a failed board, or any failed step inside it)."""
     results: dict = {}
 
     def one(b: Board) -> None:
@@ -361,8 +362,17 @@ def run(boards: list[Board], name: str) -> list[str]:
     out = A.CAPTURES / f"tracking-{name}.json"
     out.write_text(json.dumps(results))
     print("saved", out, flush=True)
-    failed = [n for n, r in results.items() if isinstance(r, dict) and "error" in r]
-    return failed
+    # A sweep that fails stays a per-level result (the other levels are still good),
+    # so look for errors at any depth, not only a board that failed outright.
+    return [n for n, r in results.items() if has_error(r)]
+
+
+def has_error(r) -> bool:
+    if isinstance(r, dict):
+        return "error" in r or any(has_error(v) for v in r.values())
+    if isinstance(r, list):
+        return any(has_error(v) for v in r)
+    return False
 
 
 def main() -> None:
