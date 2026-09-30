@@ -15,7 +15,7 @@ Disable the system getty on the UART first.
 | Key | Action |
 |---|---|
 | `+` / `-` | zoom in / out |
-| `z` / `x` | focus near / far (stock firmware naming, see PROTOCOL.md) |
+| `z` / `x` | focus near / far (direction measured on video; opposite to Pelco-D bit names, see PROTOCOL.md) |
 | `h` / `l` (Colemak `i`) | pan left / right |
 | `j` / `k` (Colemak `n` / `e`) | tilt down / up |
 | Space, Enter | stop |

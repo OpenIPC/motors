@@ -28,9 +28,11 @@ spec and the captures behind it. In short:
     C5 addr cmd1 cmd2 data1 data2 cksum 5C       (fixed 8 bytes)
     cksum = (addr + cmd1 + cmd2 + data1 + data2) % 256 as the stock firmware
             sends it; the board does not check it, nor addr, nor the 5C
-    cmd1: 01 focus (Pelco "near"), 02 iris open, 04 iris close
+    cmd1: 01 focus farther, 02 iris open, 04 iris close
     cmd2: 02 right, 04 left, 08 up, 10 down, 20 zoom tele, 40 zoom wide,
-          80 focus (Pelco "far"); bit 0 set = extended command
+          80 focus nearer; bit 0 set = extended command
+    (the focus bits are named by measured direction, which is the reverse
+    of their Pelco-D names; see PROTOCOL.md "Focus direction")
           (03 set preset, 05 clear preset, 07 goto preset, 25 zoom speed, ...)
 
 PTZ -> camera:
@@ -52,8 +54,8 @@ from .framing import SYNC
 COUNTER_XOR = 0x25
 
 PELCO_CMD2 = ((0x02, "right"), (0x04, "left"), (0x08, "up"), (0x10, "down"),
-              (0x20, "zoom+"), (0x40, "zoom-"), (0x80, "focus-far"))
-PELCO_CMD1 = ((0x01, "focus-near"), (0x02, "iris-open"), (0x04, "iris-close"))
+              (0x20, "zoom+"), (0x40, "zoom-"), (0x80, "focus-near"))
+PELCO_CMD1 = ((0x01, "focus-far"), (0x02, "iris-open"), (0x04, "iris-close"))
 EXTENDED = {0x03: "set-preset", 0x05: "clear-preset", 0x07: "goto-preset",
             0x25: "zoom-speed", 0x27: "focus-speed", 0x2B: "auto-focus",
             0x4F: "set-zoom-pos", 0x51: "query-pan", 0x53: "query-tilt", 0x55: "query-zoom"}

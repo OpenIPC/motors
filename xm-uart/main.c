@@ -23,14 +23,14 @@
 #define ADDRESS 1    /* ignored by the board, 1 in the stock configuration */
 
 /* cmd1 / cmd2 bits (PROTOCOL.md, "Command bits") */
-#define CMD1_FOCUS_FAR 0x01 /* stock "FocusFar"; Pelco-D calls this bit "near" */
+#define CMD1_FOCUS_FAR 0x01 /* farther (measured); Pelco-D calls it "near" */
 #define CMD2_RIGHT 0x02
 #define CMD2_LEFT 0x04
 #define CMD2_UP 0x08
 #define CMD2_DOWN 0x10
 #define CMD2_ZOOM_TELE 0x20
 #define CMD2_ZOOM_WIDE 0x40
-#define CMD2_FOCUS_NEAR 0x80 /* stock "FocusNear"; Pelco-D calls this bit "far" */
+#define CMD2_FOCUS_NEAR 0x80 /* nearer (measured); Pelco-D calls it "far" */
 
 #define MAX_SPEED 0x3f
 

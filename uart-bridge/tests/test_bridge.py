@@ -249,7 +249,7 @@ def test_codec_decodes_pelco_and_replies():
     assert codec.decode(bytes.fromhex("c50100000000015c")).text == "pelco addr=1 stop"
     assert "ck=01!=21" in codec.decode(bytes.fromhex("c50100200000015c")).text
     # Captured from the stock firmware (e1-stock): sum % 256, iris bits, presets.
-    assert codec.decode(bytes.fromhex("c50100800000815c")).text == "pelco addr=1 focus-far"
+    assert codec.decode(bytes.fromhex("c50100800000815c")).text == "pelco addr=1 focus-near"
     assert codec.decode(bytes.fromhex("c50104000000055c")).text == "pelco addr=1 iris-close"
     assert codec.decode(bytes.fromhex("c50100030005095c")).text == "pelco addr=1 set-preset 00 05"
     assert codec.decode(bytes.fromhex("c50100070005 0d5c".replace(" ", ""))).fields["extended"] == "goto-preset"
@@ -476,3 +476,45 @@ def test_pty_write_gives_up_when_nobody_reads():
     n = cam.write(b"\xef" * 1_000_000)
     assert n < 1_000_000 and time.monotonic() - t < 0.5
     cam.close()
+
+
+def test_inject_sends_on_abort_when_stopped_early():
+    ptz_m, ptz_path, ptz_s = pty_port()
+    ptz = bridge.open_port(ptz_path, 115200)
+    stop = bytes.fromhex("c50100000000015c")
+    stopper = bridge.Stopper()
+    sched = [(0, ZOOM_IN), (5_000_000_000, stop)]      # stop due in 5 s
+    th = threading.Thread(target=inject.run, args=(ptz, sched, LogWriter(io.StringIO(), {}), stopper),
+                          kwargs={"on_abort": stop})
+    th.start()
+    assert read_exact(ptz_m, 8) == ZOOM_IN
+    stopper.stop = True                                # interrupted before the stop was due
+    th.join(2)
+    assert read_exact(ptz_m, 8, timeout=0.5) == stop
+    os.close(ptz_m)
+    os.close(ptz_s)
+
+
+def test_on_abort_completes_a_partial_frame_first():
+    ptz_m, ptz_path, ptz_s = pty_port()
+    ptz = bridge.open_port(ptz_path, 115200)
+    stop = bytes.fromhex("c50100000000015c")
+    stopper = bridge.Stopper()
+    sched = [(0, ZOOM_IN + b"\xa5"), (5_000_000_000, stop)]   # a lone A5 left on the wire
+    th = threading.Thread(target=inject.run, args=(ptz, sched, LogWriter(io.StringIO(), {}), stopper),
+                          kwargs={"on_abort": stop})
+    th.start()
+    assert read_exact(ptz_m, 9) == ZOOM_IN + b"\xa5"
+    stopper.stop = True
+    th.join(2)
+    assert read_exact(ptz_m, 15, timeout=0.5) == bytes(7) + stop   # frame completed, then stop
+    os.close(ptz_m)
+    os.close(ptz_s)
+
+
+def test_on_abort_hex_is_validated_by_the_parser():
+    import pytest
+    from uart_bridge.cli import build_parser
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["inject", "--frame", "c5", "--on-abort", "zz"])
+    assert build_parser().parse_args(["inject", "--frame", "c5", "--on-abort", "c501"]).on_abort == b"\xc5\x01"

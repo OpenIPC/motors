@@ -168,7 +168,8 @@ def cmd_inject(a: argparse.Namespace) -> int:
         printer = None if a.quiet else Printer(collapse=not a.all)
         print(f"injecting {len(schedule)} writes into {a.ptz}, logging to {path}", file=sys.stderr)
         stats = inject.run(ptz, schedule, writer, stopper,
-                           on_data=printer.data if printer else None, tail=a.tail)
+                           on_data=printer.data if printer else None, tail=a.tail,
+                           on_abort=a.on_abort or b"")
         if printer:
             printer.flush()
     ptz.close()
@@ -221,6 +222,13 @@ def positive(text: str) -> float:
     return v
 
 
+def hex_bytes(text: str) -> bytes:
+    try:
+        return bytes.fromhex(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not hex bytes: {text!r}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="uart-bridge", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -253,6 +261,9 @@ def build_parser() -> argparse.ArgumentParser:
     i.add_argument("--rate", type=positive, default=20.0, help="frames/s for --frame")
     i.add_argument("--duration", type=positive, default=1.0, help="seconds to send --frame for")
     i.add_argument("--tail", type=float, default=0.5, help="seconds to keep listening afterwards")
+    i.add_argument("--on-abort", metavar="HEX", type=hex_bytes,
+                   help="bytes to send if interrupted before the schedule is done, "
+                        "e.g. the XM stop frame c50100000000015c")
     i.add_argument("--log", type=Path)
     i.add_argument("--latency", type=int, default=1)
     i.add_argument("--quiet", action="store_true")

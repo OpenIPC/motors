@@ -87,8 +87,8 @@ The stock firmware's DVRIP command names are the reference here. Pelco-D's own n
 |---|---|---|---|---|---|---|
 | ZoomTile | 00 | **20** | 00 | 00 | zoom tele | zoom in; reports `X…` rising (**verified**) |
 | ZoomWide | 00 | **40** | 00 | 00 | zoom wide | zoom out (**verified**) |
-| FocusNear | 00 | **80** | 00 | 00 | *focus far* | focus moves (**verified**); direction, see note |
-| FocusFar | **01** | 00 | 00 | 00 | *focus near* | focus moves the other way (**verified**) |
+| FocusNear | 00 | **80** | 00 | 00 | *focus far* | **focus nearer** (**verified**, see *Focus direction*) |
+| FocusFar | **01** | 00 | 00 | 00 | *focus near* | **focus farther** (**verified**) |
 | IrisLarge | **02** | 00 | 00 | 00 | iris open | no visible effect (luma unchanged) |
 | IrisSmall | **04** | 00 | 00 | 00 | iris close | no visible effect |
 | DirectionLeft | 00 | **04** | 27 | 00 | pan left | none, no pan motor |
@@ -98,13 +98,24 @@ The stock firmware's DVRIP command names are the reference here. Pelco-D's own n
 | diagonals | 00 | OR of the above, e.g. LeftUp `0C`, RightDown `12` | 27 | 27 | | none |
 | *(any stop)* | 00 | 00 | 00 | 00 | stop | stops zoom/focus (**verified**) |
 
-**Focus naming.** The stock firmware sends cmd2 `0x80` for "FocusNear", but Pelco-D calls that bit "focus far". The physical direction could not be settled on the test scene. Both directions defocus it symmetrically, and both end stops are equally blurred at wide zoom. So this spec, and `xm-uart`, follow the stock firmware's naming. If a scene with a clear near/far target shows otherwise, swap the two labels in `xm-uart/main.c`, not the bytes the stock firmware is known to send.
+**Focus direction (verified).** On this board **cmd2 `0x80` moves focus nearer and cmd1 `0x01` moves it farther.** That is what the stock firmware's names say (FocusNear / FocusFar), and the **opposite of the Pelco-D names** for those bits.
+
+How it was measured: at X2.4, focus was swept across its whole range in 0.1 s steps, one direction per sweep, after taking up backlash. At each step, two RTSP frames gave a gradient-energy (Tenengrad) sharpness for several targets. The depth order of the targets is certain from occlusion alone: the chair in the foreground covers part of the doorway, and the far room's door is only visible through that doorway. Three Siemens stars on the wall were measured as well.
+
+| Sweep | far room door / door leaf / stars peak at step | near chair peaks at step | near − far |
+|---|---|---|---|
+| cmd2 `80` | 15.6 – 15.8 | 16.9 | **+1.2** |
+| cmd1 `01` (reverse) | 19.5 – 19.8 | 18.6 | **−1.0** |
+| cmd2 `80` (repeat) | 17.4 – 17.5 | 18.4 | **+1.0** |
+
+Sweeping with cmd2 `80`, the distant targets sharpen first and the near chair after them: focus is moving nearer. The offset changes sign when the sweep is reversed, so it isn't a timing artefact. An earlier, independent run gave +0.9, −1.1, +0.9. The far targets peak together: beyond about 3 m everything is close to the hyperfocal distance at this focal length. The chair, at about 1 m, differs roughly five times more in 1/distance. Data: `captures/focus-direction-sweeps.json`. Reproduce with `uart-bridge/scripts/xm_uart_audit.py focusdir`.
 
 ### Timing (stock)
 
 - **One frame per action.** A move is a single start frame, and stopping is a single stop frame. Nothing is repeated.
 - A command goes out about 150–250 ms after the DVRIP request and takes the place of the next `A5` slot, so the 50 ms cadence is kept.
 - The zoom keeps moving until a stop frame arrives. Stock DVRIP sends stop when the UI button is released.
+- **Zoom range is X1.0 – X5.0 on this lens.** At an end stop a zoom command produces no motion and **no reports**, so a silent board at the end of travel is normal, not a fault.
 - **Focus has backlash.** After a run of 0.2 s focus steps in one direction, one 0.2 s step back did not return to the previous sharpness (blur 3.24, then 3.98 after the next step, then 3.94 after stepping back). Short reversals partly go into lost motion, so any autofocus built on these commands must re-measure after every reversal.
 
 ### Extended commands (cmd2 bit 0 set)
@@ -158,7 +169,7 @@ The camera sends `A5 xx 9E xx xx xx xx xx` every 50 ms from boot, whether or not
 |---|---|---|
 | checksum `% 100` | different from stock for any sum ≥ 100, e.g. focus `…80 00 00 1D 5C` instead of `…81 5C`; harmless only because the board ignores it | `% 256`, as stock sends it |
 | `h` "Pan left" sent cmd2 `02`, `l` "Pan right" sent `04` | pan directions swapped relative to stock and Pelco-D | left `04`, right `02` |
-| `z` "Focus near" sent cmd1 `01` | the opposite of what the stock firmware calls FocusNear | `z` sends cmd2 `80`, `x` sends cmd1 `01` (see *Focus naming*) |
+| `z` "Focus near" sent cmd1 `01` | focused **farther**, the opposite of its label (verified on video) | `z` sends cmd2 `80` (nearer), `x` sends cmd1 `01` (farther); see *Focus direction* |
 | `AUTO_FOCUS` compile switch for sync `C5` / `FF` | `FF` frames are ignored by this board | fixed `C5` |
 | replies parsed per `read()`, looking for `'X'` in byte 0 | zoom reports never parsed; printed as scattered hex dumps and fragments like `Magnification: X1` | `EF 01 type len` framing with a buffer; prints `Zoom X1.4`, `Zoom report blank`, day/night |
 | stop after `while(1)` was unreachable; the terminal was never restored | Ctrl-C left the lens moving and the terminal without echo | SIGINT/SIGTERM/SIGHUP, `q` and stdin EOF all send stop and restore the terminal (`e2-exit-paths`) |
@@ -177,3 +188,4 @@ These are in [`captures/`](captures/), in the `uart-bridge` JSONL format. Replay
 | `e2-exit-paths.jsonl` | fixed xm-uart stopped by SIGINT and by `q` in the middle of a zoom |
 | `e3e-control.jsonl` | a plain zoom-in and stop (host as camera) |
 | `e3e-lone-a5-then-zoom.jsonl` | the parser trap: a lone `A5` byte, then a zoom-in that never happens |
+| `focus-direction-sweeps.json` | per-step sharpness of the near, far and star targets for the three focus sweeps |
