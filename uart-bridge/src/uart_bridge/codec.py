@@ -11,7 +11,8 @@ Camera -> PTZ, A5 frames (stock firmware sends them at 20/s even when idle):
     byte 1   counter ^ 0x25; the counter increments once per second
              (confirmed: consecutive values differ by exactly n ^ (n+1),
              and 0x1a -> 0x65 is the 0x3f -> 0x40 carry)
-    byte 2   0x9E, constant
+    byte 2   data, not a constant: 9E for hours, then 92 without a reboot;
+             churns (9F 9D 93 90 91 96) in the first minute after boot
     byte 3-6 change with the counter through a non-linear scramble (not a
              plain XOR with it); not decoded yet
     byte 6   bits 1..0 also flip for single frames between counter steps,
@@ -77,10 +78,9 @@ class Decoded:
 
 
 def _a5(frame: bytes) -> Decoded:
-    f = {"counter": counter(frame), "magic": frame[2],
+    f = {"counter": counter(frame), "b2": frame[2],
          "body": frame[3:7].hex(" "), "tail": frame[7]}
-    warn = "" if frame[2] == 0x9E else " !magic"
-    return Decoded(True, f, f"xm n={f['counter']:02x} body={f['body']} tail={frame[7]:02x}{warn}")
+    return Decoded(True, f, f"xm n={f['counter']:02x} b2={frame[2]:02x} body={f['body']} tail={frame[7]:02x}")
 
 
 def _pelco(frame: bytes) -> Decoded:

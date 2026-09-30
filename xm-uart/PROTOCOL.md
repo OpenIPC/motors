@@ -18,6 +18,7 @@ Test rig: XM **HI3516EV300_85H50AI** camera, stock firmware V5.00.R02.000529B2, 
 | Levels | TTL UART, full duplex |
 | Format | **115200 baud, 8N1**, no flow control (**verified**) |
 | Camera side | `/dev/ttyAMA0` on the camera SoC; the system getty must be off on it |
+| Shared with the console | the camera's **U-Boot console goes out on this same UART** at boot ("System startup", "U-Boot 2016.11…", "Starting kernel…"), so the lens board receives it. It is mostly ASCII. In three power cycles the window from power loss to the resumed `A5` stream held about 2074 bytes, with 3–5 non-ASCII bytes of power-up line noise (e.g. `8F 92 C6`) and never an `A5` or `C5` (**verified**, `e13`–`e15`). If a noise byte ever were a sync byte, it would only swallow the first 7 bytes of the resuming `A5` stream: the camera sends no commands at that point. |
 
 ## Traffic at a glance
 
@@ -157,11 +158,39 @@ The camera sends `A5 xx 9E xx xx xx xx xx` every 50 ms from boot, whether or not
 |---|---|
 | 0 | `A5` |
 | 1 | `counter ^ 0x25`; the counter increments once per second (**verified**: consecutive values differ by exactly `n ^ (n+1)`) |
-| 2 | `9E`, constant |
+| 2 | **data, not a constant**: `9E` for hours, then `92` with no reboot in between; it cycles through `9F 9D 93 90 91 96` in the first minute after boot, then settles (**verified**, `e13`) |
 | 3–6 | scrambled together with the counter, not decoded. The two low bits of byte 6 change every frame for about 2 s after the camera receives zoom reports. |
 | 7 | different in every frame, even with bytes 0–6 unchanged; not a sum or XOR of bytes 0–6 |
 
 **The board shows no observable reaction to it.** It never answers, zoom and focus stay put, and a defocused lens is **not** refocused while the stream runs (15 s watched). Focus is nevertheless held through a zoom (sharpness unchanged from X2.4 to X3.2), which points to zoom/focus tracking inside the board. Whether the stream carries anything the board uses is open. The old xm-uart sent one such frame (`a5 7b 9e f0 ef ee e0 f4`) as an "init". That frame is from this stream, and the board accepts it as a complete frame and ignores it, so it has been removed.
+
+## Power-up behaviour
+
+**The lens board re-homes on its own every time it is powered, and then returns the zoom to where it was before power was lost.** The camera sends no `C5` command during boot at all.
+
+Measured by power-cycling the camera over PoE with the bridge logging throughout and RTSP video recorded from the moment it came up. The lens board is powered from the camera, so it loses power as well. Times are from the start of each capture; power returns at ≈17 s.
+
+| Time | Camera → board | Lens (from the video) |
+|---|---|---|
+| 17.9 – 20 s | U-Boot console text | (no video yet) |
+| 24.7 s | `A5` stream resumes, 4.7 s after "Starting kernel"; byte 2 churns for about a minute | (no video yet) |
+| 35 s | RTSP video available | heavily defocused |
+| 40 – 45 s | | focus sweeps through sharp and out again |
+| ≈51 s | | **zoom driven to the wide end** (X1.0) |
+| 52 – 64 s | | parked at wide, defocused |
+| 66 – 68 s | | refocused at wide |
+| ≈70 s | board sends **one** zoom report: the pre-power-off value | **zoom returns to the last position**, then refocuses |
+| after 80 s | | stable and sharp |
+
+The restored positions: X3.0 → X3.0 (`e14`), X2.0 → X2.0 (`e15`), and X1.2 → X1.1 (`e13`). Focus comes back sharp even when the lens was deliberately defocused before power-off (blur 12.5 → 4.8), because the board re-derives focus from zoom tracking.
+
+**The homing is done by the board itself.** In `e15` the bridge ran with `--mute-cam`, so the board received nothing from the camera, and the same homing sequence ran and the zoom still returned to its pre-power-off X2.0. The board must therefore store the last zoom position itself.
+
+**Camera traffic affects when the zoom is restored.** With the camera connected, the return and its report came at ≈70 s (68.2 s and 70.5 s in two runs). With the camera muted, it came at 119.2 s. So the board seems to wait for something from the camera's `A5` stream, with a timeout fallback. This rests on one muted run and is **unverified**.
+
+The lens column comes from RTSP frames sampled across each run (a 4×4 contact sheet per run, not committed because it shows the lab room). The field of view gives the zoom: wide at ≈51–64 s, back at the pre-power-off framing by ≈70 s, or 119 s when muted. Tenengrad sharpness on the centre of the frame gives the focus: peaks at 42 s and 51 s, a steady defocused plateau at 52–63 s, and a climb to a stable maximum by ≈80 s.
+
+A replacement for the camera firmware doesn't need to home or restore the lens at boot, because the board does both. It should expect a single zoom report about a minute after power-up, and must not send motion commands in the meantime.
 
 ## Where the old xm-uart went wrong
 
@@ -188,4 +217,7 @@ These are in [`captures/`](captures/), in the `uart-bridge` JSONL format. Replay
 | `e2-exit-paths.jsonl` | fixed xm-uart stopped by SIGINT and by `q` in the middle of a zoom |
 | `e3e-control.jsonl` | a plain zoom-in and stop (host as camera) |
 | `e3e-lone-a5-then-zoom.jsonl` | the parser trap: a lone `A5` byte, then a zoom-in that never happens |
+| `e13-powercycle.jsonl.gz` | camera power-cycled over PoE (lens at X1.2); includes the U-Boot console text and the post-boot `A5` churn |
+| `e14-powercycle.jsonl.gz` | power cycle from X3.0 defocused; zoom returns to X3.0 at 70.5 s |
+| `e15-powercycle-muted.jsonl.gz` | power cycle from X2.0 with `--mute-cam` (board hears nothing); still homes and returns to X2.0 at 119.2 s |
 | `focus-direction-sweeps.json` | per-step sharpness of the near, far and star targets for the three focus sweeps |

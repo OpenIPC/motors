@@ -188,11 +188,16 @@ def run(
     duration: float | None = None,
     on_mark: Callable[[int, str], None] | None = None,
     cam_last_ns: int | None = None,
+    mute_cam: bool = False,
 ) -> Stats:
     """Forward cam<->ptz until stopped.
 
     `cam_last_ns` is when the camera line last carried a byte before the
     bridge started (from drain_stale); None means it was quiet.
+
+    With `mute_cam`, camera bytes are logged but not forwarded: the PTZ board
+    hears nothing from the camera (probes still go through). Used to tell
+    what the board does on its own from what the camera makes it do.
 
     `control` is a readable fd (normally stdin). Each line read from it is
     either `!<hex>`, sent to the PTZ board and logged as h2p (a probe), or
@@ -282,6 +287,13 @@ def run(
                 src, dst, d = key.data
                 data = src.read(4096)
                 if not data:
+                    continue
+                if d == C2P and mute_cam:
+                    writer.data(t, d, data)
+                    stats.bytes[d] += len(data)
+                    stats.reads[d] += 1
+                    if on_data:
+                        on_data(t, d, data)
                     continue
                 if d == C2P and not cam_synced:
                     gap = t - prev_c2p_read

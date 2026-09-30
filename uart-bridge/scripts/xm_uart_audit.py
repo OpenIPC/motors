@@ -83,10 +83,10 @@ def pulse(name: str, cmd: str, hold: float = 0.35) -> list[float]:
 class Bridge:
     """`uart-bridge bridge` in the background, with marks and probes on stdin."""
 
-    def __init__(self, log: str, note: str, pty: bool = False):
+    def __init__(self, log: str, note: str, pty: bool = False, extra: tuple[str, ...] = ()):
         self.log = HERE / log
         self.log.unlink(missing_ok=True)  # the bridge never overwrites a capture
-        args = [UV, "run", "uart-bridge", "bridge", "--quiet", "--note", note, "--log", log]
+        args = [UV, "run", "uart-bridge", "bridge", "--quiet", "--note", note, "--log", log, *extra]
         if pty:
             args[4:4] = ["--cam", "pty"]
         self.p = subprocess.Popen(args, cwd=HERE, stdin=subprocess.PIPE, stderr=subprocess.PIPE, text=True)

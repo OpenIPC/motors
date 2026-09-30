@@ -605,3 +605,34 @@ def test_failed_abort_after_clean_stop_is_raised():
         inject.run(port, [(5_000_000_000, ZOOM_IN)], writer, stopper, on_abort=STOP_FRAME)
     assert err.value is port.errors[0]                # the abort write's error, not the log's
     port.close()
+
+
+def test_mute_cam_logs_but_does_not_forward_camera_bytes():
+    cam_m, cam_path, cam_s = pty_port()
+    ptz_m, ptz_path, ptz_s = pty_port()
+    cam = bridge.open_port(cam_path, 115200)
+    ptz = bridge.open_port(ptz_path, 115200)
+    log = io.StringIO()
+    stopper, th = run_bridge_thread(cam, ptz, log, mute_cam=True)
+    try:
+        time.sleep(0.02)
+        os.write(cam_m, ZOOM_IN)
+        assert read_exact(ptz_m, 8, timeout=0.3) == b""           # board hears nothing
+        os.write(ptz_m, REPLY)
+        assert read_exact(cam_m, len(REPLY)) == REPLY              # board -> camera still flows
+    finally:
+        stopper.stop = True
+        th.join(2)
+    assert f'"d":"c2p","x":"{ZOOM_IN.hex()}"' in log.getvalue()   # but it is logged
+    for fd in (cam_m, cam_s, ptz_m, ptz_s):
+        os.close(fd)
+
+
+def test_read_log_reads_gzipped_captures(tmp_path):
+    import gzip
+    p = tmp_path / "c.jsonl.gz"
+    with gzip.open(p, "wt") as fp:
+        w = LogWriter(fp, {"mode": "test"})
+        w.data(10, C2P, IDLE[0])
+    header, recs = read_log(p)
+    assert header["mode"] == "test" and recs[0].data == IDLE[0]

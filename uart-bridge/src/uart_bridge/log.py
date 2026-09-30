@@ -15,6 +15,7 @@ artefacts, not frame boundaries; framing.py reassembles frames.
 from __future__ import annotations
 
 import datetime as _dt
+import gzip
 import json
 import subprocess
 from dataclasses import dataclass
@@ -75,7 +76,8 @@ class LogWriter:
 def read_log(path: str | Path) -> tuple[dict, list[Record]]:
     header: dict = {}
     records: list[Record] = []
-    with open(path) as fp:
+    opener = gzip.open if str(path).endswith(".gz") else open
+    with opener(path, "rt") as fp:
         for n, line in enumerate(fp, 1):
             line = line.strip()
             if not line:

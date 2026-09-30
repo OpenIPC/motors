@@ -115,7 +115,7 @@ def cmd_bridge(a: argparse.Namespace) -> int:
         writer = LogWriter(fp, {
             "mode": "bridge", "cam": a.cam, "ptz": a.ptz,
             "baud": a.baud, "ptz_baud": a.ptz_baud or a.baud, "latency": latency,
-            "stale_dropped": stale, "note": a.note or "",
+            "stale_dropped": stale, "mute_cam": a.mute_cam, "note": a.note or "",
         })
         stopper = bridge.Stopper()
         stopper.install()
@@ -133,7 +133,7 @@ def cmd_bridge(a: argparse.Namespace) -> int:
                            on_data=printer.data if printer else None,
                            control=control, duration=a.duration,
                            on_mark=printer.mark if printer else None,
-                           cam_last_ns=cam_drain.last_ns)
+                           cam_last_ns=cam_drain.last_ns, mute_cam=a.mute_cam)
         if printer:
             printer.flush()
     cam.close()
@@ -247,6 +247,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="FTDI latency timer in ms, set via sysfs (0 = leave as is; default 1)")
     b.add_argument("--quiet", action="store_true", help="no live output")
     b.add_argument("--all", action="store_true", help="print every frame, not only changes")
+    b.add_argument("--mute-cam", action="store_true",
+                   help="log camera bytes but do not forward them to the PTZ board")
     b.add_argument("--no-stdin", action="store_true",
                    help="ignore stdin (no marks, no probes)")
     b.set_defaults(func=cmd_bridge)
