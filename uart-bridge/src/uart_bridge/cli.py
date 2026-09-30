@@ -12,11 +12,11 @@ from pathlib import Path
 
 from . import analysis, codec
 from .framing import Frame
-from .log import C2P, H2P, MARK, P2C, LogWriter, read_log
+from .log import C2M, C2P, H2P, MARK, P2C, LogWriter, read_log
 
 DEFAULT_CAM = "/dev/ttyUSB0"
 DEFAULT_PTZ = "/dev/ttyUSB1"
-ARROW = {C2P: "cam->ptz", P2C: "ptz->cam", H2P: "host->ptz", analysis.TO_PTZ: "->ptz"}
+ARROW = {C2P: "cam->ptz", P2C: "ptz->cam", H2P: "host->ptz", C2M: "cam-x-ptz", analysis.TO_PTZ: "->ptz"}
 
 
 def fmt_t(t: int) -> str:
@@ -94,8 +94,8 @@ def open_log(path: Path | None, mode: str):
 
 def print_stats(stats, path: Path) -> None:
     print(f"\nlog: {path}", file=sys.stderr)
-    for d in (C2P, P2C, H2P):
-        if d == H2P and not stats.reads[d]:
+    for d in (C2P, P2C, H2P, C2M):
+        if d in (H2P, C2M) and not stats.reads[d]:
             continue
         print(f"  {ARROW[d]}: {stats.bytes[d]} bytes in {stats.reads[d]} reads", file=sys.stderr)
 
@@ -194,7 +194,8 @@ def cmd_decode(a: argparse.Namespace) -> int:
     printer.flush()
     s = analysis.summarize(analysis.events(records))
     lo, mean, hi = s.c2p_period_ms
-    print(f"# {s.duration_s:.1f}s  frames c2p={s.frames[C2P]} p2c={s.frames[P2C]} h2p={s.frames[H2P]}  "
+    print(f"# {s.duration_s:.1f}s  frames c2p={s.frames[C2P]} p2c={s.frames[P2C]} h2p={s.frames[H2P]}"
+          + (f" c2m(muted)={s.frames[C2M]}" if s.frames[C2M] else "") + "  "
           f"junk bytes c2p={s.junk_bytes[C2P]} p2c={s.junk_bytes[P2C]} h2p={s.junk_bytes[H2P]}  "
           f"c2p rate={s.c2p_rate:.2f}/s period min/mean/max={lo:.1f}/{mean:.1f}/{hi:.1f} ms")
     return 0
@@ -279,7 +280,7 @@ def build_parser() -> argparse.ArgumentParser:
     d = sub.add_parser("decode", help="print an annotated timeline of a capture")
     d.add_argument("file", type=Path)
     d.add_argument("--all", action="store_true", help="print every frame, not only changes")
-    d.add_argument("--dir", choices=("both", C2P, P2C, H2P), default="both")
+    d.add_argument("--dir", choices=("both", C2P, P2C, H2P, C2M), default="both")
     d.set_defaults(func=cmd_decode)
 
     f = sub.add_parser("diff", help="compare two captures; exit 1 on divergence")

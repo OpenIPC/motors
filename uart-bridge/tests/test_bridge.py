@@ -623,7 +623,8 @@ def test_mute_cam_logs_but_does_not_forward_camera_bytes():
     finally:
         stopper.stop = True
         th.join(2)
-    assert f'"d":"c2p","x":"{ZOOM_IN.hex()}"' in log.getvalue()   # but it is logged
+    assert f'"d":"c2m","x":"{ZOOM_IN.hex()}"' in log.getvalue()   # logged as muted, not c2p
+    assert '"d":"c2p"' not in log.getvalue()
     for fd in (cam_m, cam_s, ptz_m, ptz_s):
         os.close(fd)
 
@@ -649,3 +650,16 @@ def test_cli_gz_capture_round_trips(tmp_path):
         assert g.read(1) == b"{"
     header, recs = read_log(p)
     assert header["mode"] == "bridge" and recs[0].data == ZOOM_IN
+
+
+def test_muted_camera_bytes_are_not_replayed_or_diffed_as_board_traffic():
+    from uart_bridge.log import C2M, Record
+    muted = [Record(0, C2M, ZOOM_IN), Record(50_000_000, C2M, IDLE[0])]
+    assert inject.schedule_replay(muted) == []                     # never sent to the board
+    evs = analysis.events(muted)
+    assert analysis.segments(evs, analysis.STREAMS[analysis.TO_PTZ]) == []
+    assert [s.key for s in analysis.segments(evs, C2M)] == [ZOOM_IN.hex(" "), "a5"]
+    # a muted capture vs one where the board really got the command: board traffic differs
+    live = [Record(0, C2P, ZOOM_IN), Record(50_000_000, C2P, IDLE[0])]
+    divs = analysis.diff(analysis.events(live), evs)
+    assert any(d.d == analysis.TO_PTZ for d in divs)

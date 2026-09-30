@@ -23,7 +23,7 @@ Test rig: XM **HI3516EV300_85H50AI** camera, stock firmware V5.00.R02.000529B2, 
 ## Traffic at a glance
 
 ```
-camera ──► board   A5 xx 9E xx xx xx xx xx   8 B, every 50 ms, always (camera heartbeat/state stream)
+camera ──► board   A5 xx xx xx xx xx xx xx   8 B, every 50 ms, always (camera heartbeat/state stream)
 camera ──► board   C5 01 c1 c2 d1 d2 ck 5C   8 B, once per user action, replaces one A5 slot
 board  ──► camera  EF 01 tt ll <ll bytes>    zoom-ratio reports while zooming, then a blank one
 ```
@@ -152,7 +152,7 @@ Replies arrive split across reads, often one byte at a time, so a receiver has t
 
 ## The camera's A5 stream (camera → board)
 
-The camera sends `A5 xx 9E xx xx xx xx xx` every 50 ms from boot, whether or not anything is connected.
+The camera sends `A5 xx xx xx xx xx xx xx` every 50 ms from boot, whether or not anything is connected.
 
 | byte | Meaning |
 |---|---|
@@ -219,5 +219,5 @@ These are in [`captures/`](captures/), in the `uart-bridge` JSONL format. Replay
 | `e3e-lone-a5-then-zoom.jsonl` | the parser trap: a lone `A5` byte, then a zoom-in that never happens |
 | `e13-powercycle.jsonl.gz` | camera power-cycled over PoE (lens at X1.2); includes the U-Boot console text and the post-boot `A5` churn |
 | `e14-powercycle.jsonl.gz` | power cycle from X3.0 defocused; zoom returns to X3.0 at 70.5 s |
-| `e15-powercycle-muted.jsonl.gz` | power cycle from X2.0 with `--mute-cam` (board hears nothing); still homes and returns to X2.0 at 119.2 s |
+| `e15-powercycle-muted.jsonl.gz` | power cycle from X2.0 with `--mute-cam`, so the board hears nothing from the camera; it still homes and returns to X2.0 at 119.2 s. The camera's output is logged as `c2m`, for "muted, never sent to the board". |
 | `focus-direction-sweeps.json` | per-step sharpness of the near, far and star targets for the three focus sweeps |

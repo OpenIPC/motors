@@ -18,7 +18,7 @@ from typing import Callable
 import serial
 
 from .framing import CAM_RULES, SYNC_BYTES, Framer
-from .log import C2P, H2P, P2C, LogWriter
+from .log import C2M, C2P, H2P, P2C, LogWriter
 
 # A probe is held back while a camera frame is half-forwarded. The rest of a
 # frame can lag by the USB latency timer (up to 16 ms) plus scheduling, so
@@ -160,8 +160,8 @@ def set_latency(path: str, ms: int) -> str:
 
 @dataclass
 class Stats:
-    bytes: dict = field(default_factory=lambda: {C2P: 0, P2C: 0, H2P: 0})
-    reads: dict = field(default_factory=lambda: {C2P: 0, P2C: 0, H2P: 0})
+    bytes: dict = field(default_factory=lambda: {C2P: 0, P2C: 0, H2P: 0, C2M: 0})
+    reads: dict = field(default_factory=lambda: {C2P: 0, P2C: 0, H2P: 0, C2M: 0})
 
 
 class Stopper:
@@ -289,11 +289,13 @@ def run(
                 if not data:
                     continue
                 if d == C2P and mute_cam:
-                    writer.data(t, d, data)
-                    stats.bytes[d] += len(data)
-                    stats.reads[d] += 1
+                    # Never reached the board: log it as c2m, so replay and
+                    # diff do not take it for board traffic.
+                    writer.data(t, C2M, data)
+                    stats.bytes[C2M] += len(data)
+                    stats.reads[C2M] += 1
                     if on_data:
-                        on_data(t, d, data)
+                        on_data(t, C2M, data)
                     continue
                 if d == C2P and not cam_synced:
                     gap = t - prev_c2p_read

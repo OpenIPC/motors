@@ -7,7 +7,8 @@ Every following line is one of:
     {"t": <ns since start>, "d": "mark", "note": "..."}                 annotation
 
 "c2p" is camera -> PTZ board, "p2c" is PTZ board -> camera, "h2p" is a frame
-the host itself sent to the PTZ board while bridging (a probe). One data record
+the host itself sent to the PTZ board while bridging (a probe), and "c2m" is
+camera output that was muted (logged, never sent to the board). One data record
 holds whatever a single read() returned, so record boundaries are USB/driver
 artefacts, not frame boundaries; framing.py reassembles frames.
 """
@@ -26,6 +27,7 @@ FORMAT_VERSION = 1
 C2P = "c2p"
 P2C = "p2c"
 H2P = "h2p"  # injected by the host into the PTZ side during a bridge run
+C2M = "c2m"  # camera bytes logged but NOT forwarded (bridge --mute-cam)
 MARK = "mark"
 
 

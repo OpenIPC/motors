@@ -5,7 +5,7 @@ byte(s) and says how long the frame is. Once a frame starts we take it whole,
 so a sync byte inside a frame (the A5 tail byte looks random) never splits
 it. Bytes no rule claims come out as junk.
 
-    camera -> PTZ   A5 xx 9E xx xx xx xx xx       8 bytes, XM scrambled frame
+    camera -> PTZ   A5 xx xx xx xx xx xx xx       8 bytes, XM scrambled frame
                     C5|FF addr c1 c2 d1 d2 ck 5C  8 bytes, XM Pelco-D variant
     PTZ -> camera   EF 01 type len payload[len]   status reply
 """
