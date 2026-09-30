@@ -69,6 +69,8 @@ class Prefixed:
 
 
 CAM_RULES = (Fixed((SYNC,)), Fixed((0xC5, 0xFF), end=0x5C))
+# Bytes the XM board's parser treats as a frame start (see xm-uart/PROTOCOL.md).
+SYNC_BYTES = (SYNC, 0xC5)
 PTZ_RULES = (Prefixed(),)
 
 

@@ -17,7 +17,7 @@ from typing import Callable
 
 import serial
 
-from .framing import CAM_RULES, Framer
+from .framing import CAM_RULES, SYNC_BYTES, Framer
 from .log import C2P, H2P, P2C, LogWriter
 
 # A probe is held back while a camera frame is half-forwarded. The rest of a
@@ -25,6 +25,82 @@ from .log import C2P, H2P, P2C, LogWriter
 # only a silence far beyond that, 20 frame periods, counts as the camera
 # having stopped mid-frame; the probe is then sent and the stall is logged.
 CAMERA_STALL_NS = 1_000_000_000
+
+# The XM board's parser takes A5 or C5 as the start of an 8-byte frame and
+# has no inter-byte timeout, so a partial frame on its wire swallows the next
+# command. Camera frames are 0.7 ms long with ~49 ms between them: a read that
+# follows this much silence starts a frame. Until one does, camera bytes are
+# logged but not forwarded, and on exit the frame in flight is completed.
+FRAME_GAP_NS = 5_000_000
+FINISH_FRAME_S = 0.1
+
+
+class PtyPort:
+    """The master side of a pseudo terminal, with the slice of the
+    serial.Serial interface the bridge uses. A program under test opens
+    `self.path` as if it were the camera's UART."""
+
+    def __init__(self) -> None:
+        import tty
+        self.master, self._slave = os.openpty()
+        tty.setraw(self._slave)  # keep the slave open: no EIO when the tool closes it
+        os.set_blocking(self.master, False)
+        self.path = os.ttyname(self._slave)
+
+    def fileno(self) -> int:
+        return self.master
+
+    def read(self, n: int) -> bytes:
+        try:
+            return os.read(self.master, n)
+        except BlockingIOError:
+            return b""
+
+    WRITE_DEADLINE_S = 0.05
+
+    def write(self, data: bytes) -> int:
+        """Write what the pty takes within WRITE_DEADLINE_S and return that
+        count. With no tool reading the slave the queue fills up; blocking
+        there would stall the whole bridge, so the rest is dropped."""
+        view = memoryview(data)
+        end = time.monotonic() + self.WRITE_DEADLINE_S
+        while view and time.monotonic() < end:
+            try:
+                view = view[os.write(self.master, view):]
+            except BlockingIOError:
+                time.sleep(0.001)
+        return len(data) - len(view)
+
+    @property
+    def in_waiting(self) -> int:
+        return 0
+
+    def reset_input_buffer(self) -> None:
+        while self.read(4096):
+            pass
+
+    def close(self) -> None:
+        os.close(self.master)
+        os.close(self._slave)
+
+
+def trailing_commands(data: bytes) -> int | None:
+    """Offset of a run of whole frames that ends `data` and contains at
+    least one checkable command (C5 ... 5C), or None.
+
+    Used while joining the camera stream mid-frame: a read that merges the
+    tail of one frame with complete frames behind it has no timing to tell
+    where the tail ends, but a C5 frame carries its own 5C end byte. A5
+    frames do not, so a tail of A5 frames alone is not trusted."""
+    for p in range(1, len(data) - 7):
+        rest = data[p:]
+        if len(rest) % 8:
+            continue
+        chunks = [rest[i:i + 8] for i in range(0, len(rest), 8)]
+        if all(c[0] in SYNC_BYTES and (c[0] != 0xC5 or c[7] == 0x5C) for c in chunks) \
+                and any(c[0] == 0xC5 for c in chunks):
+            return p
+    return None
 
 
 def open_port(path: str, baud: int) -> serial.Serial:
@@ -38,21 +114,32 @@ def open_port(path: str, baud: int) -> serial.Serial:
     )
 
 
-def drain_stale(port: serial.Serial, settle_s: float = 0.03) -> int:
+@dataclass
+class Drained:
+    bytes: int
+    last_ns: int | None  # time.monotonic_ns() of the last byte seen, None if the line was quiet
+
+
+def drain_stale(port: serial.Serial, settle_s: float = 0.03) -> Drained:
     """Discard input that piled up before we opened the port.
 
     While nothing reads a port, the kernel and the FTDI chip keep buffering
     what the board sends; on open that backlog (kilobytes, and garbled once
     the buffers wrap) arrives in a burst and the bridge would forward it to
     the other board. Flush, then keep discarding for `settle_s` so bytes
-    still in flight from the adapter are dropped too. Returns bytes dropped."""
+    still in flight from the adapter are dropped too. The time of the last
+    byte seen tells run() whether the camera line was quiet when it started."""
     dropped = port.in_waiting
+    last = time.monotonic_ns() if dropped else None
     port.reset_input_buffer()
     end = time.monotonic() + settle_s
     while time.monotonic() < end:
-        dropped += len(port.read(4096))
+        n = len(port.read(4096))
+        if n:
+            dropped += n
+            last = time.monotonic_ns()
         time.sleep(0.002)
-    return dropped
+    return Drained(dropped, last)
 
 
 def set_latency(path: str, ms: int) -> str:
@@ -100,8 +187,12 @@ def run(
     control: int | None = None,
     duration: float | None = None,
     on_mark: Callable[[int, str], None] | None = None,
+    cam_last_ns: int | None = None,
 ) -> Stats:
     """Forward cam<->ptz until stopped.
+
+    `cam_last_ns` is when the camera line last carried a byte before the
+    bridge started (from drain_stale); None means it was quiet.
 
     `control` is a readable fd (normally stdin). Each line read from it is
     either `!<hex>`, sent to the PTZ board and logged as h2p (a probe), or
@@ -117,7 +208,10 @@ def run(
     probes: list[bytes] = []
     cam_framer = Framer(CAM_RULES)
     last_c2p = 0
+    cam_synced = False
     t0 = time.monotonic_ns()
+    # When the camera last sent anything, relative to t0.
+    prev_c2p_read = (cam_last_ns - t0) if cam_last_ns is not None else -FRAME_GAP_NS
     last_flush = t0
 
     def send_probes(t: int) -> None:
@@ -138,12 +232,32 @@ def run(
             if on_data:
                 on_data(t, H2P, probe)
         probes.clear()
+    def finish_frame() -> None:
+        """Forward the rest of a camera frame already partly on the PTZ wire."""
+        nonlocal last_c2p
+        end = time.monotonic() + FINISH_FRAME_S
+        while cam_framer.pending() and time.monotonic() < end:
+            data = cam.read(8 - len(cam_framer.pending()))
+            if not data:
+                time.sleep(0.001)
+                continue
+            t = time.monotonic_ns() - t0
+            ptz.write(data)
+            writer.data(t, C2P, data)
+            stats.bytes[C2P] += len(data)
+            stats.reads[C2P] += 1
+            cam_framer.feed(t, data)
+            last_c2p = t
+        if cam_framer.pending():
+            writer.mark(time.monotonic_ns() - t0,
+                        f"exited with a partial camera frame on the PTZ wire: {cam_framer.pending().hex(' ')}")
+
     try:
         while not stopper.stop:
             now = time.monotonic_ns()
             if duration is not None and now - t0 >= duration * 1e9:
                 break
-            for key, _ in sel.select(timeout=0.2):
+            for key, _ in sel.select(timeout=0.05):
                 t = time.monotonic_ns() - t0
                 if key.data is None:
                     chunk = os.read(control, 4096)
@@ -169,7 +283,28 @@ def run(
                 data = src.read(4096)
                 if not data:
                     continue
-                dst.write(data)
+                if d == C2P and not cam_synced:
+                    gap = t - prev_c2p_read
+                    prev_c2p_read = t
+                    if gap >= FRAME_GAP_NS and data[0] in SYNC_BYTES:
+                        cam_synced = True
+                    else:
+                        p = trailing_commands(data)
+                        skipped = data if p is None else data[:p]
+                        note = f"joined camera mid-frame, not forwarded: {skipped.hex(' ')}"
+                        writer.mark(t, note)
+                        if on_mark:
+                            on_mark(t, note)
+                        if p is None:
+                            continue
+                        data = data[p:]
+                        cam_synced = True
+                written = dst.write(data)
+                if written is not None and written < len(data):
+                    note = f"{d}: {len(data) - written} bytes dropped, nobody reading the pty"
+                    writer.mark(t, note)
+                    if on_mark:
+                        on_mark(t, note)
                 writer.data(t, d, data)
                 stats.bytes[d] += len(data)
                 stats.reads[d] += 1
@@ -183,6 +318,7 @@ def run(
             if now - last_flush > 1e9:
                 writer.flush()
                 last_flush = now
+        finish_frame()
     finally:
         sel.close()
         writer.flush()

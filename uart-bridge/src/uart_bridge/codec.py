@@ -22,19 +22,25 @@ Camera -> PTZ, A5 frames (stock firmware sends them at 20/s even when idle):
     The PTZ board does not answer A5 frames, including xm-uart's init[]
     (a5 7b 9e f0 ef ee e0 f4), which is from the same family.
 
-Camera -> PTZ, XM Pelco-D variant (what xm-uart sends; the board answers):
+Camera -> PTZ, XM Pelco-D variant: see xm-uart/PROTOCOL.md for the full
+spec and the captures behind it. In short:
 
-    C5|FF addr cmd1 cmd2 data1 data2 cksum 5C
-    cksum = (addr + cmd1 + cmd2 + data1 + data2) % 100
+    C5 addr cmd1 cmd2 data1 data2 cksum 5C       (fixed 8 bytes)
+    cksum = (addr + cmd1 + cmd2 + data1 + data2) % 256 as the stock firmware
+            sends it; the board does not check it, nor addr, nor the 5C
+    cmd1: 01 focus (Pelco "near"), 02 iris open, 04 iris close
     cmd2: 02 right, 04 left, 08 up, 10 down, 20 zoom tele, 40 zoom wide,
-          80 focus far; cmd1: 01 focus near; data1/data2 pan/tilt speed
+          80 focus (Pelco "far"); bit 0 set = extended command
+          (03 set preset, 05 clear preset, 07 goto preset, 25 zoom speed, ...)
 
 PTZ -> camera:
 
     EF 01 type len payload[len]
-    type 00: position report, payload ends in ASCII "X<zoom> " (e.g. X1.3);
-             sent repeatedly while the zoom moves
-    type 02, len 1: 01 night, 00 day (per xm-uart)
+    type 00, len 09: 04 03 2F 2E + ASCII "X<zoom> ", ~every 225 ms while
+             the zoom moves; the camera overlays it on the OSD
+    type 00, len 0A: 04 03 2F 2E + six spaces, ~6.7 s after the last zoom
+             report (reads like "erase the ratio text"; effect unverified)
+    type 02, len 1: 01 night, 00 day (per the old xm-uart; not observed)
 """
 
 from __future__ import annotations
@@ -47,6 +53,14 @@ COUNTER_XOR = 0x25
 
 PELCO_CMD2 = ((0x02, "right"), (0x04, "left"), (0x08, "up"), (0x10, "down"),
               (0x20, "zoom+"), (0x40, "zoom-"), (0x80, "focus-far"))
+PELCO_CMD1 = ((0x01, "focus-near"), (0x02, "iris-open"), (0x04, "iris-close"))
+EXTENDED = {0x03: "set-preset", 0x05: "clear-preset", 0x07: "goto-preset",
+            0x25: "zoom-speed", 0x27: "focus-speed", 0x2B: "auto-focus",
+            0x4F: "set-zoom-pos", 0x51: "query-pan", 0x53: "query-tilt", 0x55: "query-zoom"}
+
+
+def checksum(frame: bytes) -> int:
+    return sum(frame[1:6]) % 256
 
 
 def counter(frame: bytes) -> int:
@@ -69,16 +83,20 @@ def _a5(frame: bytes) -> Decoded:
 
 def _pelco(frame: bytes) -> Decoded:
     addr, c1, c2, d1, d2, ck = frame[1:7]
-    ok = (addr + c1 + c2 + d1 + d2) % 100 == ck
+    ok = checksum(frame) == ck
+    note = "" if ok else f" ck={ck:02x}!={checksum(frame):02x}"
+    if c2 & 0x01:
+        name = EXTENDED.get(c2, f"ext-{c2:02x}")
+        f = {"addr": addr, "extended": name, "cmd1": c1, "cmd2": c2, "data1": d1, "data2": d2,
+             "cksum_ok": ok}
+        return Decoded(True, f, f"pelco addr={addr} {name} {d1:02x} {d2:02x}{note}")
     acts = [name for bit, name in PELCO_CMD2 if c2 & bit]
-    if c1 & 0x01:
-        acts.append("focus-near")
+    acts += [name for bit, name in PELCO_CMD1 if c1 & bit]
     f = {"addr": addr, "cmd1": c1, "cmd2": c2, "pan_speed": d1, "tilt_speed": d2,
          "actions": acts, "cksum_ok": ok}
     text = (f"pelco addr={addr} {'+'.join(acts) or 'stop'}"
-            + (f" pan={d1}" if d1 else "") + (f" tilt={d2}" if d2 else "")
-            + ("" if ok else f" !cksum {ck}"))
-    return Decoded(ok, f, text)
+            + (f" pan={d1}" if d1 else "") + (f" tilt={d2}" if d2 else "") + note)
+    return Decoded(True, f, text)
 
 
 def _reply(frame: bytes) -> Decoded:
@@ -91,6 +109,9 @@ def _reply(frame: bytes) -> Decoded:
         f["zoom"] = payload[x:].decode().strip()
         f["prefix"] = payload[:x].hex(" ")
         text = f"reply type={typ:02x} {f['prefix']} zoom={f['zoom']}"
+    elif x < 0 and payload[:4] == b"\x04\x03\x2f\x2e" and payload[4:].strip(b" ") == b"":
+        f["erase"] = True
+        text = f"reply type={typ:02x} zoom report blank"
     elif typ == 0x02 and n == 1:
         f["night"] = payload[0] == 1
         text = f"reply {'night' if payload[0] == 1 else 'day' if payload[0] == 0 else payload.hex()}"

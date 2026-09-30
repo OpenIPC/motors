@@ -53,7 +53,7 @@ The `-orig` / `-openipc` suffix selects the toolchain via a target-specific `CC`
 | `-orig` | `arm-hisiv510-linux-gcc` | xm-uart (HiSilicon vendor) |
 | `-orig` | `arm-himix200-linux-gcc` | an41908a (HiSilicon vendor) |
 
-**Build gotcha:** the pattern rules (`xm-%: main.o`) share a single `main.o` across variants. GNU make inherits the target-specific `CC` into prerequisites, so plain `make` compiles `main.o` once with the `-orig` toolchain and then links that same object into the `-openipc` binary. `make -n` in `xm-kmotor/` shows it plainly. Build one variant at a time with `make clean` in between.
+**Build gotcha (`xm-kmotor/`):** the pattern rule (`xm-%: main.o`) shares a single `main.o` across variants. GNU make inherits the target-specific `CC` into prerequisites, so plain `make` compiles `main.o` once with the `-orig` toolchain and then links that same object into the `-openipc` binary. `make -n` in `xm-kmotor/` shows it plainly. Build one variant at a time with `make clean` in between. `xm-uart/` compiles `main.c` per variant and doesn't have this problem; it also has a native `xm-uart-motors-host` target for running under `uart-bridge`.
 
 `camhi-motor/`, `i2c-motor/`, and `ingenic-motor/` have **no Makefile** — compile the single source directly with the right cross-compiler for that SoC (see the arch warning below).
 
@@ -103,7 +103,7 @@ Understanding which pattern a tool uses explains most of its code:
 
 2. **Direct bus / register access from user space** (`i2c-motor`, `i2c-motor/sigmastar-ssc338q`, `an41908a`, `zenointel-sd2n4g`). No custom kernel module — the tool drives the motor-driver IC itself over I2C SMBus (`/dev/i2c-2`, MS32006 at addr `0x10`) or SPI (`/dev/spidev2.0`, AN41908A) plus sysfs GPIO. `i2c-motor` also needs `devmem` pinmux writes first (documented in its Readme). `i2c-motor/sigmastar-ssc338q` maps `/dev/mem` autonomously to un-gate the motor power rail via RIU register `0x1F223618` (Bank `0x111B` Offset `0x06`). `zenointel-sd2n4g` has no driver IC at all — it maps `/dev/mem` and bit-bangs a 4-wire stepper head straight on the Goke GK7205V510 PL061 GPIO banks (`0x120B0000 + bank*0x1000`), replaying `gpioStep.ko`'s half-step phase table; open-loop, no home sensor.
 
-3. **Serial protocol over UART** (`xm-uart`). Speaks a Pelco-D variant to a Xiongmai AF module on `/dev/ttyAMA0` at 115200 8N1; interactive keyboard REPL. Note the `AUTO_FOCUS` compile-time switch changes the sync byte from `0xff` to `0xc5`, and system getty must be disabled on that UART.
+3. **Serial protocol over UART** (`xm-uart`). Speaks the XM Pelco-D variant (`C5 addr c1 c2 d1 d2 ck 5C`) to a Xiongmai zoom/focus lens board on `/dev/ttyAMA0` at 115200 8N1; interactive keyboard REPL. System getty must be disabled on that UART. **`xm-uart/PROTOCOL.md` is the measured spec**, backed by captures in `xm-uart/captures/`. Read it before changing any byte: the board accepts only sync `C5`, ignores checksum/address/trailer, and has no inter-byte timeout, so a partial frame silently eats the next command. The direction and focus bits follow what the stock firmware sends, not generic Pelco-D naming.
 
 ## The three `/dev/motor` ioctl ABIs are mutually incompatible
 
