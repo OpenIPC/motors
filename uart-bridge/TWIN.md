@@ -93,7 +93,7 @@ This measures how far each board's tracked focus is from that camera's sharpest 
 ## Pitfalls (all hit in the lab)
 - **Two readers on the lens tty.** See step 1.
 - **Unequal starting focus.** An XM board refocuses by itself after every zoom, from its tracking; the reference camera's traffic adds nothing to that, so replaying the `A5` stream or not makes no difference. Each zoom puts focus back on the board's own curve (a manual offset is mostly lost), but the curve itself can differ between lenses, so compare from the same starting state anyway. Allow ~10 s after a zoom stop before measuring: the board can make a last focus move that late.
-- **Stale lens state.** Compare only after both boards have re-homed. Earlier autofocus runs, or sweeps, leave focus offsets that tracking preserves through every zoom move.
+- **Stale lens state.** Compare only after both boards have re-homed. Earlier autofocus runs, or sweeps, leave focus offsets. A zoom mostly resets them (fully on the vendor board, and when zooming out of the wide stop), but the OpenIPC board kept about a fifth of a mid-range offset through a zoom, so a zoom alone is not a clean start.
 - **Relay in `/tmp`.** It's gone after the power cycle that re-homing needs. Install it into the overlay.
 - **Different scenes.** Absolute sharpness numbers aren't comparable between cameras. Compare trends and the positions of peaks, not values.
 - **Killing your own session.** `pkill -f pattern` matches the SSH command line that contains the same pattern. Use `pgrep`/`pkill` on a pattern that isn't in your own command, or kill by PID.

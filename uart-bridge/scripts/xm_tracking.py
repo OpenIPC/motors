@@ -199,11 +199,11 @@ def exp_combined(b: Board) -> dict:
         "wide + farther (c1 01, c2 40)": A.frame(c1=0x01, c2=0x40),
     }
     out = {}
-    for name, fr in variants.items():
+    for i, (name, fr) in enumerate(variants.items()):
         start = b.to_level(LEVELS["X2.0"])
         s0 = b.sharpness()
         # resent every 50 ms for 1.5 s, the way a held button would
-        z = b.inject("combined", [(i * 0.05, fr) for i in range(30)] + [(1.5, A.STOP)])
+        z = b.inject(f"combined-{i}", [(i * 0.05, fr) for i in range(30)] + [(1.5, A.STOP)])
         s1 = b.sharpness()
         time.sleep(7.0)
         s2 = b.sharpness()
@@ -214,12 +214,12 @@ def exp_combined(b: Board) -> dict:
 
 def exp_interleave(b: Board) -> dict:
     out = {}
-    for name, seq in (("zoom, focus frame at 0.8 s, stop at 2.0 s",
+    for i, (name, seq) in enumerate((("zoom, focus frame at 0.8 s, stop at 2.0 s",
                        [(0, A.ZOOM_IN), (0.8, NEARER), (2.0, A.STOP)]),
                       ("focus, zoom frame at 0.8 s, stop at 2.0 s",
-                       [(0, NEARER), (0.8, A.ZOOM_IN), (2.0, A.STOP)])):
+                       [(0, NEARER), (0.8, A.ZOOM_IN), (2.0, A.STOP)]))):
         start = b.to_level(LEVELS["X2.0"])
-        z = b.inject("interleave", seq)
+        z = b.inject(f"interleave-{i}", seq)
         out[name] = {"start": start, "reports": z}
         say(b, f"{name}: from X{start}, reports {z}")
     return out
