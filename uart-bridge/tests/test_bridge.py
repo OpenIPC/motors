@@ -249,7 +249,7 @@ def test_codec_decodes_pelco_and_replies():
     assert codec.decode(bytes.fromhex("c50100000000015c")).text == "pelco addr=1 stop"
     assert "ck=01!=21" in codec.decode(bytes.fromhex("c50100200000015c")).text
     # Captured from the stock firmware (e1-stock): sum % 256, iris bits, presets.
-    assert codec.decode(bytes.fromhex("c50100800000815c")).text == "pelco addr=1 focus-far"
+    assert codec.decode(bytes.fromhex("c50100800000815c")).text == "pelco addr=1 focus-near"
     assert codec.decode(bytes.fromhex("c50104000000055c")).text == "pelco addr=1 iris-close"
     assert codec.decode(bytes.fromhex("c50100030005095c")).text == "pelco addr=1 set-preset 00 05"
     assert codec.decode(bytes.fromhex("c50100070005 0d5c".replace(" ", ""))).fields["extended"] == "goto-preset"

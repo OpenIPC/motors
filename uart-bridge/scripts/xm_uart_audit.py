@@ -17,6 +17,7 @@ tool    a program under test through `bridge --cam pty`, scripted keys (E2)
 focus   RTSP sharpness (ffmpeg blurdetect) for regions of the current image
 restore zoom out/in with the board's own reports until it reads --zoom
 refocus hill-climb focus on RTSP sharpness (experiments leave focus drifted)
+focusdir which focus bit moves focus nearer: sweeps with near and far targets
 
 Everything moves the lens; `accept` and `tool` return the zoom to where it
 started, `stock` leaves it roughly there, `restore` fixes the rest.
@@ -299,12 +300,96 @@ def resync_camera_osd() -> list[float]:
     return zooms(br.log)
 
 
+def gray_frames(a, n: int = 2) -> tuple[int, int, list[bytes]]:
+    """n consecutive RTSP frames as 8-bit greyscale, straight from ffmpeg."""
+    url = (f"rtsp://{a.camera}:554/user={a.user}&password={a.password}"
+           "&channel=1&stream=0.sdp?real_stream")
+    probe = subprocess.run(["ffprobe", "-v", "error", "-rtsp_transport", "tcp", "-select_streams", "v:0",
+                            "-show_entries", "stream=width,height", "-of", "csv=p=0", url],
+                           capture_output=True, text=True, timeout=30).stdout.split(",")
+    w, h = int(probe[0]), int(probe[1])
+    raw = subprocess.run(["ffmpeg", "-loglevel", "error", "-rtsp_transport", "tcp", "-i", url,
+                          "-frames:v", str(n), "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+                         capture_output=True, timeout=30).stdout
+    return w, h, [raw[i * w * h:(i + 1) * w * h] for i in range(len(raw) // (w * h))]
+
+
+def tenengrad(frame: bytes, w: int, x: int, y: int, r: int) -> float:
+    """Mean squared central-difference gradient in a (2r)^2 box: higher is sharper."""
+    total = 0
+    for yy in range(y - r + 1, y + r - 1):
+        row, up, down = yy * w, (yy - 1) * w, (yy + 1) * w
+        for xx in range(x - r + 1, x + r - 1):
+            gx = frame[row + xx + 1] - frame[row + xx - 1]
+            gy = frame[down + xx] - frame[up + xx]
+            total += gx * gx + gy * gy
+    return total / (2 * r - 2) ** 2
+
+
+def peak_position(values: list[float]) -> float:
+    """Centroid of the part of a sharpness curve above 80% of its maximum."""
+    top = max(values)
+    pts = [(i + 1, v / top - 0.8) for i, v in enumerate(values) if v / top >= 0.8]
+    return sum(i * wgt for i, wgt in pts) / sum(wgt for _, wgt in pts)
+
+
+def parse_target(text: str) -> tuple[str, tuple[int, int, int]]:
+    name, xyr = text.split("=")
+    x, y, r = (int(v) for v in xyr.split(","))
+    return name, (x, y, r)
+
+
+def cmd_focusdir(a) -> None:
+    """Which focus bit moves focus nearer. Sweep focus across its range in
+    small steps (one direction per sweep, backlash taken up first) and find
+    where each target is sharpest: sweeping nearer, far targets peak before
+    near ones. The sweep is repeated in reverse and again forwards, so a
+    physical effect has to flip sign with the direction."""
+    near = dict(parse_target(t) for t in a.near)
+    far = dict(parse_target(t) for t in a.far)
+    targets = {**near, **far}
+    bit80, bit01 = frame(c2=0x80), frame(c1=0x01)
+    pulse("focusdir-away", bit01, hold=a.away)
+    time.sleep(0.3)
+    verdicts = []
+    for name, move in (("cmd2 0x80", bit80), ("cmd1 0x01", bit01), ("cmd2 0x80", bit80)):
+        pulse("focusdir-takeup", move, hold=0.15)
+        time.sleep(0.3)
+        curves = {k: [] for k in targets}
+        for _ in range(a.steps):
+            pulse("focusdir-step", move, hold=a.step)
+            time.sleep(0.3)
+            w, _, frames = gray_frames(a)
+            for k, (x, y, r) in targets.items():
+                curves[k].append(sum(tenengrad(f, w, x, y, r) for f in frames) / len(frames))
+        peaks = {k: peak_position(v) for k, v in curves.items()}
+        offset = (sum(peaks[k] for k in near) / len(near)) - (sum(peaks[k] for k in far) / len(far))
+        print(f"sweep {name}: " + "  ".join(f"{k}={v:.2f}" for k, v in peaks.items())
+              + f"  near-far={offset:+.2f} steps", flush=True)
+        # near peaking later means this sweep moves focus nearer
+        verdicts.append(("0x80" if move == bit80 else "0x01") if offset > 0 else
+                        ("0x01" if move == bit80 else "0x80"))
+    if len(set(verdicts)) == 1:
+        bit = verdicts[0]
+        print(f"focus NEARER = {'cmd2 0x80' if bit == '0x80' else 'cmd1 0x01'} (all three sweeps agree)")
+    else:
+        print(f"inconclusive: sweeps disagree {verdicts}")
+    pulse("focusdir-back", bit01, hold=a.away)  # roughly back; use `refocus` to finish
+
+
 def cmd_restore(a) -> None:
-    z = pulse("restore-probe", ZOOM_IN, hold=0.1)
+    # Reports come every ~225 ms while zooming, so the probe must be longer.
+    z = pulse("restore-probe", ZOOM_IN, hold=0.3)
+    last = None
     for i in range(40):
         if not z:
-            raise SystemExit("no zoom reports from the board")
-        now = z[-1]
+            # The board is silent when a zoom pulse cannot move: the lens is
+            # at an end stop (X5.0 at tele on the 85H50AI).
+            if last is None:
+                raise SystemExit("no zoom reports from the board")
+            print(f"at the zoom end stop near X{last}; target X{a.zoom} is out of range")
+            return
+        now = last = z[-1]
         if abs(now - a.zoom) < 0.05:
             # Only done once the camera has seen a report on target: the
             # resync nudge moves the lens too, so measure what it left.
@@ -323,7 +408,8 @@ def cmd_restore(a) -> None:
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
-    for name, fn in (("stock", cmd_stock), ("focus", cmd_focus), ("refocus", cmd_refocus)):
+    for name, fn in (("stock", cmd_stock), ("focus", cmd_focus), ("refocus", cmd_refocus),
+                     ("focusdir", cmd_focusdir)):
         s = sub.add_parser(name)
         s.add_argument("--camera", required=True)
         s.add_argument("--user", default="admin")
@@ -331,6 +417,15 @@ def main() -> None:
         s.set_defaults(func=fn)
     sub.choices["stock"].add_argument("--python-dvr", default="~/git/python-dvr")
     sub.choices["stock"].add_argument("--preset", type=int, default=5)
+    fd = sub.choices["focusdir"]
+    # Defaults: the 85H50AI rig at X2.4. The chair occludes the doorway and the
+    # far door is seen through it, so their depth order is certain.
+    fd.add_argument("--near", action="append", metavar="NAME=X,Y,R",
+                    default=None, help="near target box centre and half-size (repeatable)")
+    fd.add_argument("--far", action="append", metavar="NAME=X,Y,R", default=None)
+    fd.add_argument("--steps", type=int, default=30)
+    fd.add_argument("--step", type=float, default=0.1, help="focus pulse per step, s")
+    fd.add_argument("--away", type=float, default=1.5, help="initial defocus, s")
     sub.add_parser("accept").set_defaults(func=cmd_accept)
     t = sub.add_parser("tool")
     t.add_argument("binary")
@@ -339,6 +434,9 @@ def main() -> None:
     r.add_argument("--zoom", type=float, default=1.2)
     r.set_defaults(func=cmd_restore)
     a = p.parse_args()
+    if a.cmd == "focusdir":
+        a.near = a.near or ["chair_mesh=200,300,90"]
+        a.far = a.far or ["room_door=660,640,70", "door_leaf=920,560,70", "star=1820,540,70"]
     a.func(a)
 
 

@@ -74,6 +74,7 @@ The XM camera ↔ lens board protocol is specified in [`xm-uart/PROTOCOL.md`](..
 - `accept`: which frame variants the board acts on, and the partial-frame trap;
 - `tool <binary>`: a program under test through the pty;
 - `focus`: RTSP sharpness;
+- `focusdir`: which focus bit moves focus nearer, by sweeping focus past near and far targets whose depth order is known from occlusion;
 - `restore` / `refocus`: put the lens back afterwards.
 
 Run `uv run scripts/xm_uart_audit.py -h` for the options.
