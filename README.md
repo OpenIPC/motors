@@ -24,6 +24,14 @@ zoom/focus on this model.
 settings and manual movement. Camera profiles describe controller-specific
 commands without hard-coding them in the application.
 
+## UART bridge / validation harness
+
+[`uart-bridge`](uart-bridge/) is a host-side Python tool (run with `uv`) that sits
+between a camera board and its PTZ motor board on two USB-UART adapters. It
+forwards and timestamps every byte, decodes frames, can stand in for the camera,
+and diffs captures so a reimplemented motor driver can be checked against the
+stock firmware's traffic.
+
 ## Some theory behind
 
 [Basic autofocus algorithms](https://www.csie.ntu.edu.tw/~fuh/personal/Images&Recognition.Vol.9,No.4.Autofocus.pdf)

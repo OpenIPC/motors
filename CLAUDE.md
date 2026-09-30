@@ -132,6 +132,16 @@ The only tool with real algorithmic content. It drives the AN41908A lens driver 
 
 On top of that it implements **contrast-based autofocus** in a background pthread (`AF_proc`): it pulls focus-value statistics from the HiSilicon ISP via `HI_MPI_ISP_GetFocusStatistics`, blends horizontal/vertical metrics into a weighted score using the `AFWeight` window map, then hill-climbs — probe a direction, follow increasing contrast, reverse and halve the step on each miss until the step reaches zero. This is why the Makefile links the whole MPP library set. The papers backing this approach are linked in the root `README.md`.
 
+## `uart-bridge/` — host-side validation harness
+
+Python (`uv run …`), not cross-compiled and not covered by the GCC gate; its
+tests are `cd uart-bridge && uv run pytest` (pty pairs, no hardware). It runs on
+a lab host wired camera-UART ↔ host ↔ PTZ-board-UART and records JSONL captures.
+`codec.py` holds what is known about the stock Xiongmai camera→PTZ frames
+(`A5 <counter^0x25> 9E …`, 20 frames/s) — the same family as `xm-uart`'s
+`init[]`. Keep `codec.key()` consistent with what `diff` should treat as
+meaningful.
+
 ## `api/` — design only, nothing implemented
 
 `api/README.md` proposes a `motors-daemon` that loads per-hardware "driver wrapper" `.so` plugins and exposes a unified PTZ/AF/IRCut API over a UNIX socket. None of it exists yet, and the open questions it raises (one wrapper at a time vs. several; whether protocol logic belongs in the kernel module or the wrapper) are unresolved. Read it before designing anything cross-cutting, but do not treat it as describing current code.
