@@ -71,6 +71,7 @@ def run(
                 owed -= 1
             elif b in (0xA5, 0xC5):
                 owed = 7
+    failure: BaseException | None = None
     try:
         while not stopper.stop:
             now = time.monotonic_ns() - t0
@@ -100,16 +101,29 @@ def run(
                     stats.reads[P2C] += 1
                     if on_data:
                         on_data(t, P2C, data)
+    except BaseException as e:
+        failure = e
+        raise
     finally:
+        abort_error = None
         if on_abort and i < len(schedule):
             # A partial frame on the wire would swallow the abort frame, so
             # complete it first (with zero bytes, which start nothing).
             pad = bytes(owed)
-            ptz.write(pad + on_abort)
             t = time.monotonic_ns() - t0
-            writer.mark(t, f"stopped with {len(schedule) - i} writes pending; sent on-abort frame"
-                           + (f" after {len(pad)} padding bytes" if pad else ""))
-            writer.data(t, C2P, pad + on_abort)
+            try:
+                ptz.write(pad + on_abort)
+            except Exception as e:  # the port may be what failed in the first place
+                abort_error = e
+                writer.mark(t, f"on-abort write failed: {e}")
+            else:
+                writer.mark(t, f"stopped with {len(schedule) - i} writes pending; sent on-abort frame"
+                               + (f" after {len(pad)} padding bytes" if pad else ""))
+                writer.data(t, C2P, pad + on_abort)
         sel.close()
         writer.flush()
+        # Never mask the error that ended the run; but if the run itself was
+        # fine (stopped by a signal) and the stop could not be sent, say so.
+        if abort_error is not None and failure is None:
+            raise abort_error
     return stats

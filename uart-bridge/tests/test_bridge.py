@@ -518,3 +518,50 @@ def test_on_abort_hex_is_validated_by_the_parser():
     with pytest.raises(SystemExit):
         build_parser().parse_args(["inject", "--frame", "c5", "--on-abort", "zz"])
     assert build_parser().parse_args(["inject", "--frame", "c5", "--on-abort", "c501"]).on_abort == b"\xc5\x01"
+
+
+class FailingPort:
+    """A port whose writes fail after the first one; readable fd from a pipe."""
+
+    def __init__(self):
+        self.r, self.w = os.pipe()
+        self.writes = 0
+
+    def fileno(self):
+        return self.r
+
+    def read(self, n):
+        return b""
+
+    def write(self, data):
+        self.writes += 1
+        if self.writes > 1:
+            raise OSError(5, "Input/output error")
+        return len(data)
+
+
+def test_failed_port_keeps_original_error_and_still_flushes_log():
+    import pytest
+    port = FailingPort()
+    log = io.StringIO()
+    sched = [(0, ZOOM_IN), (1_000_000, ZOOM_IN), (5_000_000_000, bytes.fromhex("c50100000000015c"))]
+    with pytest.raises(OSError) as err:
+        inject.run(port, sched, LogWriter(log, {}), bridge.Stopper(),
+                   on_abort=bytes.fromhex("c50100000000015c"))
+    assert err.value.errno == 5                        # the original failure, not a masking one
+    assert "on-abort write failed" in log.getvalue()   # cleanup ran and was logged
+    os.close(port.r)
+    os.close(port.w)
+
+
+def test_failed_abort_after_clean_stop_is_raised():
+    import pytest
+    port = FailingPort()
+    port.writes = 1                                    # every write from now on fails
+    stopper = bridge.Stopper()
+    stopper.stop = True                                # stopped by a signal before any write
+    with pytest.raises(OSError):
+        inject.run(port, [(5_000_000_000, ZOOM_IN)], LogWriter(io.StringIO(), {}), stopper,
+                   on_abort=bytes.fromhex("c50100000000015c"))
+    os.close(port.r)
+    os.close(port.w)
