@@ -11,6 +11,10 @@ from .log import C2P, H2P, MARK, P2C, Record
 
 RULES = {C2P: CAM_RULES, H2P: CAM_RULES, P2C: PTZ_RULES}
 DIRECTIONS = (C2P, H2P, P2C)
+# diff compares what the PTZ board received, whoever sent it: camera traffic
+# and bridge probes (or inject writes, logged c2p) are one stream.
+TO_PTZ = "to-ptz"
+STREAMS = {TO_PTZ: (C2P, H2P), P2C: (P2C,)}
 
 
 def framers() -> dict[str, Framer]:
@@ -27,25 +31,38 @@ class Event:
 
 
 def events(records: list[Record]) -> list[Event]:
+    """Frame every direction. Consecutive junk in one direction is merged, so
+    unrecognised bytes form the same event however the reads split them."""
     fr = framers()
     out: list[Event] = []
+    last: dict[str, Event] = {}  # previous data event per direction
+    last_t: dict[str, int] = {}
+
+    def emit(ev: Event) -> None:
+        prev = last.get(ev.d)
+        if ev.kind == "junk" and prev is not None and prev.kind == "junk":
+            prev.data += ev.data
+            return
+        out.append(ev)
+        last[ev.d] = ev
+
     for r in records:
         if r.d == MARK:
             out.append(Event(r.t, MARK, "mark", note=r.note))
             continue
+        last_t[r.d] = r.t
         for item in fr[r.d].feed(r.t, r.data):
-            kind = "frame" if isinstance(item, Frame) else "junk"
-            out.append(Event(item.t, r.d, kind, item.data))
+            emit(Event(item.t, r.d, "frame" if isinstance(item, Frame) else "junk", item.data))
     for d, f in fr.items():
         if f.pending():
-            out.append(Event(records[-1].t if records else 0, d, "junk", f.pending()))
+            emit(Event(last_t[d], d, "junk", f.pending()))
     return out
 
 
-def key_of(ev: Event) -> str:
+def key_of(ev: Event, strict_a5: bool = False) -> str:
     if ev.kind == "junk":
         return "junk:" + ev.data.hex(" ")
-    return codec.key(ev.data)
+    return codec.key(ev.data, strict_a5)
 
 
 @dataclass
@@ -53,19 +70,27 @@ class Segment:
     key: str
     count: int
     t: int  # first occurrence
+    t_last: int = 0
+
+    @property
+    def span_ms(self) -> float:
+        return (self.t_last - self.t) / 1e6
 
 
-def segments(evs: list[Event], d: str) -> list[Segment]:
-    """Run-length encode the frames of one direction by key()."""
+def segments(evs: list[Event], d: str | tuple[str, ...], strict_a5: bool = False) -> list[Segment]:
+    """Run-length encode the frames of one direction (or several, merged in
+    capture order) by key()."""
+    dirs = (d,) if isinstance(d, str) else d
     out: list[Segment] = []
     for ev in evs:
-        if ev.d != d or ev.kind == "mark":
+        if ev.d not in dirs or ev.kind == "mark":
             continue
-        k = key_of(ev)
+        k = key_of(ev, strict_a5)
         if out and out[-1].key == k:
             out[-1].count += 1
+            out[-1].t_last = ev.t
         else:
-            out.append(Segment(k, 1, ev.t))
+            out.append(Segment(k, 1, ev.t, ev.t))
     return out
 
 
@@ -100,40 +125,55 @@ def summarize(evs: list[Event]) -> Summary:
 @dataclass
 class Divergence:
     d: str
-    op: str  # replace / delete / insert / timing
+    op: str  # replace / delete / insert / count / span / gap
     a: list[Segment]
     b: list[Segment]
+    detail: str = ""
 
 
 def diff(evs_a: list[Event], evs_b: list[Event], tolerance: int = 3,
-         keep_edges: bool = False) -> list[Divergence]:
+         time_tolerance_ms: float = 150.0, strict_a5: bool = False,
+         ignore_edges: bool = False) -> list[Divergence]:
     """Compare two captures direction by direction.
 
-    Segments are compared by key; a matching segment whose repeat count differs
-    by more than `tolerance` frames is a timing divergence. Unmatched runs at
-    the very start or end only reflect where each capture was cut, so they are
-    dropped unless `keep_edges`.
+    Segments (runs of frames with the same key) are aligned by key. For each
+    aligned pair:
+      count  repeat counts differ by more than `tolerance` frames
+      span   first-to-last frame time differs by more than `time_tolerance_ms`
+      gap    time from the previous aligned segment's last frame differs by
+             more than `time_tolerance_ms` (a command sent late or slowly)
+    A capture's first and last segment is cut by the capture itself, so its
+    count and span are not compared. Unmatched segments are always reported
+    unless `ignore_edges`, which drops unmatched runs at either capture end;
+    use it only with `strict_a5`, where the counter makes the ends differ.
     """
     out: list[Divergence] = []
-    for d in DIRECTIONS:
-        sa, sb = segments(evs_a, d), segments(evs_b, d)
+    tol_ns = time_tolerance_ms * 1e6
+    for d, dirs in STREAMS.items():
+        sa, sb = segments(evs_a, dirs, strict_a5), segments(evs_b, dirs, strict_a5)
         sm = difflib.SequenceMatcher(a=[s.key for s in sa], b=[s.key for s in sb], autojunk=False)
         ops = sm.get_opcodes()
         for n, (op, i1, i2, j1, j2) in enumerate(ops):
-            if op == "equal":
-                for k in range(i2 - i1):
-                    ia, ib = i1 + k, j1 + k
-                    x, y = sa[ia], sb[ib]
-                    # A capture's first and last segment are cut short by the capture itself.
-                    at_edge = ia in (0, len(sa) - 1) or ib in (0, len(sb) - 1)
-                    if abs(x.count - y.count) > tolerance and (keep_edges or not at_edge):
-                        out.append(Divergence(d, "timing", [x], [y]))
+            if op != "equal":
+                if ignore_edges and n in (0, len(ops) - 1) and len(ops) > 1:
+                    continue
+                out.append(Divergence(d, op, sa[i1:i2], sb[j1:j2]))
                 continue
-            # Only an edge next to a match is a capture-cut artefact; a capture
-            # with no match at all is a real divergence.
-            edge = (n == 0 and len(ops) > 1 and ops[1][0] == "equal") or \
-                   (n == len(ops) - 1 and n > 0 and ops[n - 1][0] == "equal")
-            if edge and not keep_edges:
-                continue
-            out.append(Divergence(d, op, sa[i1:i2], sb[j1:j2]))
+            for k in range(i2 - i1):
+                ia, ib = i1 + k, j1 + k
+                x, y = sa[ia], sb[ib]
+                cut = ia in (0, len(sa) - 1) or ib in (0, len(sb) - 1)
+                if not cut and abs(x.count - y.count) > tolerance:
+                    out.append(Divergence(d, "count", [x], [y], f"x{x.count} vs x{y.count}"))
+                elif not cut and abs(x.span_ms - y.span_ms) * 1e6 > tol_ns:
+                    out.append(Divergence(d, "span", [x], [y],
+                                          f"{x.span_ms:.0f} ms vs {y.span_ms:.0f} ms"))
+                if k > 0:  # previous segment is aligned too
+                    # From the previous segment's last frame, which a capture
+                    # cut cannot move (it only truncates a segment's start).
+                    ga = x.t - sa[ia - 1].t_last
+                    gb = y.t - sb[ib - 1].t_last
+                    if abs(ga - gb) > tol_ns:
+                        out.append(Divergence(d, "gap", [x], [y],
+                                              f"{ga / 1e6:.0f} ms vs {gb / 1e6:.0f} ms after previous"))
     return out

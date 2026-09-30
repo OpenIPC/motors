@@ -20,9 +20,11 @@ import serial
 from .framing import CAM_RULES, Framer
 from .log import C2P, H2P, P2C, LogWriter
 
-# A probe is held back while a camera frame is half-forwarded, unless the
-# camera has been quiet this long (it stopped mid-frame).
-PROBE_HOLD_NS = 20_000_000
+# A probe is held back while a camera frame is half-forwarded. The rest of a
+# frame can lag by the USB latency timer (up to 16 ms) plus scheduling, so
+# only a silence far beyond that, 20 frame periods, counts as the camera
+# having stopped mid-frame; the probe is then sent and the stall is logged.
+CAMERA_STALL_NS = 1_000_000_000
 
 
 def open_port(path: str, baud: int) -> serial.Serial:
@@ -34,6 +36,23 @@ def open_port(path: str, baud: int) -> serial.Serial:
         xonxoff=False, rtscts=False, dsrdtr=False,
         exclusive=True,
     )
+
+
+def drain_stale(port: serial.Serial, settle_s: float = 0.03) -> int:
+    """Discard input that piled up before we opened the port.
+
+    While nothing reads a port, the kernel and the FTDI chip keep buffering
+    what the board sends; on open that backlog (kilobytes, and garbled once
+    the buffers wrap) arrives in a burst and the bridge would forward it to
+    the other board. Flush, then keep discarding for `settle_s` so bytes
+    still in flight from the adapter are dropped too. Returns bytes dropped."""
+    dropped = port.in_waiting
+    port.reset_input_buffer()
+    end = time.monotonic() + settle_s
+    while time.monotonic() < end:
+        dropped += len(port.read(4096))
+        time.sleep(0.002)
+    return dropped
 
 
 def set_latency(path: str, ms: int) -> str:
@@ -102,8 +121,15 @@ def run(
     last_flush = t0
 
     def send_probes(t: int) -> None:
-        if not probes or (cam_framer.pending() and t - last_c2p < PROBE_HOLD_NS):
+        if not probes:
             return
+        if cam_framer.pending():
+            if t - last_c2p < CAMERA_STALL_NS:
+                return
+            note = f"camera stalled mid-frame ({cam_framer.pending().hex(' ')}); probe sent anyway"
+            writer.mark(t, note)
+            if on_mark:
+                on_mark(t, note)
         for probe in probes:
             ptz.write(probe)
             writer.data(t, H2P, probe)

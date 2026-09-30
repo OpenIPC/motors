@@ -107,9 +107,15 @@ def decode(frame: bytes) -> Decoded:
     return Decoded(False, {}, "unknown")
 
 
-def key(frame: bytes) -> str:
-    """What a frame means, as far as we know. A5 frames drop the tail byte,
-    which changes in every frame; everything else is compared whole."""
+def key(frame: bytes, strict_a5: bool = False) -> str:
+    """What a frame means, as far as we know.
+
+    An A5 frame's bytes 1-6 follow a per-second counter whose phase depends on
+    when the camera booted, and the scramble is not decoded, so by default an
+    A5 frame is only its class: diff then checks that the stream is there and
+    its cadence, not its content. `strict_a5` compares bytes 0-6 instead (for
+    captures whose counters run in step); byte 7 changes every frame and is
+    never compared. Other frames are compared whole."""
     if len(frame) == 8 and frame[0] == SYNC:
-        return frame[:7].hex(" ")
+        return frame[:7].hex(" ") if strict_a5 else "a5"
     return frame.hex(" ")

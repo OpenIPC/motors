@@ -24,11 +24,11 @@ uv run pytest                                   # pty-based tests, no hardware n
 uv run uart-bridge bridge --note "idle"         # forward + log; Ctrl-C to stop
 uv run uart-bridge decode captures/<file>.jsonl # annotated timeline (--all: every frame)
 uv run uart-bridge diff stock.jsonl ours.jsonl  # exit 1 on divergence
-uv run uart-bridge inject --replay stock.jsonl  # host acts as camera (stop the bridge first)
+uv run uart-bridge inject --replay stock.jsonl  # host acts as camera, replays c2p + h2p (stop the bridge first)
 uv run uart-bridge inject --frame a52e9eea2662efae --rate 20 --duration 2
 ```
 
-- While `bridge` runs, each line on stdin is stored in the log as a timestamped mark, for example `pan left pressed`. A line of the form `!<hex>` is sent to the PTZ board as a probe and logged as `h2p`. A probe waits for the end of any camera frame in flight, so it never splices into one. For example, xm-uart's zoom-in then stop:
+- While `bridge` runs, each line on stdin is stored in the log as a timestamped mark, for example `pan left pressed`. A line of the form `!<hex>` is sent to the PTZ board as a probe and logged as `h2p`. A probe waits for the end of any camera frame in flight, so it never splices into one. If the camera stops mid-frame for 1 s, the probe goes out anyway and the stall is logged as a mark. For example, xm-uart's zoom-in then stop:
   `( sleep 2; echo '!c50100200000215c'; sleep .5; echo '!c50100000000015c'; sleep 2 ) | uv run uart-bridge bridge --duration 6`
 - `bridge` and `inject` open the ports exclusively and set the FTDI latency timer to 1 ms through sysfs, using `--latency` (0 leaves it alone). The default is 16 ms, which makes every timestamp late by up to 16 ms.
 
@@ -51,13 +51,15 @@ The first line is a header: `{"type":"header","version":1,"wall":...,"git":...,"
 
 ## What `diff` compares
 
-Each direction is framed and run-length encoded by `codec.key()`. The segment sequences are then aligned with difflib. The diff reports:
-- changed, missing or extra segments;
-- segments whose repeat count differs by more than `--tolerance` frames, which is a timing difference.
+The traffic is split into two streams: what the PTZ board received (`c2p` and `h2p` together, since a probe and a camera command reach the board the same way) and what it answered (`p2c`). Each stream is framed and run-length encoded by `codec.key()` into segments. The segment sequences are aligned with difflib, and the diff reports:
+- **insert / delete / replace:** segments present in only one capture, including at either end.
+- **count:** a segment repeats more than `--tolerance` frames more or less often.
+- **span:** a segment lasts more than `--time-tolerance` ms longer or shorter.
+- **gap:** a segment starts more than `--time-tolerance` ms earlier or later after the previous one, which catches a command sent late.
 
-Unmatched runs at the very start or end of a capture only reflect where the capture was cut, so the diff ignores them unless you pass `--keep-edges`.
+A capture's first and last segment is cut by the capture itself, so its count and span are not compared.
 
-For now, `key()` is bytes 0–6 of the frame. The body still contains the counter, so two captures only line up when both counters run in step. Once the body scramble is decoded, `key()` should drop the counter.
+By default an `A5` frame is compared only as the class `a5`. Its bytes follow a per-second counter whose phase depends on when the camera booted, and the scramble is not decoded yet. The diff therefore checks that the stream is there and keeps its cadence, not what it carries. `--strict-a5` compares bytes 0–6. Combine it with `--ignore-edges` for two captures whose counters run in step. Other frames (Pelco commands, PTZ replies) are always compared byte for byte.
 
 ## Protocol notes (stock firmware, camera → PTZ)
 

@@ -46,6 +46,8 @@ def pty_port():
 
 
 def read_exact(fd, n, timeout=2.0):
+    """Read up to n bytes, giving up after `timeout` s (returns what arrived)."""
+    os.set_blocking(fd, False)
     buf = b""
     end = time.monotonic() + timeout
     while len(buf) < n and time.monotonic() < end:
@@ -118,29 +120,97 @@ BODIES = ["a5319ef75cb159", "a5309ef45eb45d", "a5339ef1246be1", "a5329ef65eb65d"
           "a53d9efb247d99", "a53c9ef82670ed"]
 
 
-def test_diff_identical_and_phase_shifted_idle_captures_match():
+def with_command(frames, at, cmd):
+    return frames[:at] + [cmd] + frames[at:]
+
+
+def test_diff_idle_captures_match_whatever_the_counter_phase():
     a = events_from(idle_stream(BODIES))
     assert analysis.diff(a, a) == []
-    # B starts 7 frames later and one body earlier-ending: only edges differ.
-    b = events_from(idle_stream(BODIES[:-1])[7:])
+    b = events_from(idle_stream(BODIES[:-1])[7:])  # other start, other end
     assert analysis.diff(a, b) == []
 
 
-def test_diff_reports_inserted_command_and_timing():
+def test_diff_strict_a5_sees_counter_edges_unless_ignored():
     a = events_from(idle_stream(BODIES))
-    moved = BODIES[:3] + ["a5339e00000000"] + BODIES[3:]
-    b = events_from(idle_stream(moved))
-    divs = analysis.diff(a, b)
-    assert [(d.op, [s.key for s in d.b]) for d in divs] == [("insert", ["a5 33 9e 00 00 00 00"])]
-    slow = idle_stream(BODIES[:2]) + idle_stream(BODIES[2:3], per=30) + idle_stream(BODIES[3:])
-    divs = analysis.diff(a, events_from(slow))
-    assert [(d.op, d.a[0].count, d.b[0].count) for d in divs] == [("timing", 20, 30)]
+    b = events_from(idle_stream(BODIES[:-1])[7:])
+    assert analysis.diff(a, b, strict_a5=True)
+    assert analysis.diff(a, b, strict_a5=True, ignore_edges=True) == []
+
+
+def test_diff_reports_inserted_command_mid_stream_and_at_edges():
+    idle = idle_stream(BODIES)
+    a = events_from(idle)
+    for at in (60, 0, len(idle)):
+        divs = analysis.diff(a, events_from(with_command(idle, at, ZOOM_IN)))
+        inserted = [s.key for d in divs if d.op == "insert" for s in d.b]
+        assert ZOOM_IN.hex(" ") in inserted and not any(d.a for d in divs), at
+
+
+def test_diff_reports_run_length_change():
+    stop = bytes.fromhex("c50100000000015c")
+    a = events_from(idle_stream(BODIES[:2]) + [ZOOM_IN] + idle_stream(BODIES[2:3]) + [stop]
+                    + idle_stream(BODIES[3:]))
+    b = events_from(idle_stream(BODIES[:2]) + [ZOOM_IN] + idle_stream(BODIES[2:3], per=30) + [stop]
+                    + idle_stream(BODIES[3:]))
+    ops = [(d.op, d.detail) for d in analysis.diff(a, b)]
+    assert ("count", "x20 vs x30") in ops
+
+
+def test_diff_reports_same_frames_sent_slower():
+    stop = bytes.fromhex("c50100000000015c")
+    frames = idle_stream(BODIES[:2]) + [ZOOM_IN] + idle_stream(BODIES[2:3]) + [stop] \
+        + idle_stream(BODIES[3:])
+    a = events_from(frames)
+    b = events_from(frames, step=60_000_000)  # 20 % slower cadence, same keys and counts
+    assert [(d.op, d.detail) for d in analysis.diff(a, b)] == [("span", "950 ms vs 1140 ms")]
+    # The stop command 300 ms late, everything else identical.
+    late = events_from(frames)
+    i = frames.index(stop)
+    for ev in late[i:]:
+        ev.t += 300_000_000
+    assert [d.op for d in analysis.diff(a, late)] == ["gap"]
 
 
 def test_diff_totally_different_captures_diverge():
     a = events_from(idle_stream(BODIES[:2]))
-    b = events_from(idle_stream(["a5009e00000000"]))
+    b = events_from([ZOOM_IN] * 5)
     assert analysis.diff(a, b)
+
+
+def test_unknown_reply_bytes_do_not_depend_on_read_split():
+    from uart_bridge.log import Record
+    unknown = bytes.fromhex("7a0102030405")
+    one = [Record(0, P2C, unknown + REPLY)]
+    split = [Record(0, P2C, unknown[:2]), Record(1, P2C, unknown[2:4]), Record(2, P2C, unknown[4:] + REPLY)]
+    assert analysis.diff(analysis.events(one), analysis.events(split)) == []
+
+
+def test_trailing_partial_frame_keeps_its_own_direction_time():
+    from uart_bridge.log import Record
+    evs = analysis.events([Record(5, C2P, IDLE[0][:3]), Record(900, P2C, REPLY)])
+    junk = [e for e in evs if e.kind == "junk"]
+    assert [(e.d, e.t) for e in junk] == [(C2P, 5)]
+
+
+def test_printer_flush_reports_final_repeat_count():
+    from uart_bridge.cli import Printer
+    out = io.StringIO()
+    p = Printer(out=out)
+    for i in range(3):
+        p.data(i, C2P, IDLE[0])
+    p.flush()
+    assert "(last frame x3)" in out.getvalue()
+
+
+def test_invalid_replay_speed_and_rate_rejected():
+    import pytest
+    from uart_bridge.cli import build_parser
+    for argv in (["inject", "--replay", "x", "--speed", "0"], ["inject", "--frame", "a5", "--rate", "-1"]):
+        with pytest.raises(SystemExit):
+            build_parser().parse_args(argv)
+    with pytest.raises(ValueError):
+        inject.schedule_replay([], speed=0)
 
 
 def test_counter_unscramble_is_monotonic_on_captured_sequence():
@@ -197,7 +267,7 @@ def test_bridge_probe_waits_for_camera_frame_boundary():
         os.write(cam_m, IDLE[0][:3])          # camera frame in flight
         assert read_exact(ptz_m, 3) == IDLE[0][:3]
         os.write(ctl_w, b"pan test\n!" + ZOOM_IN.hex().encode() + b"\n")
-        time.sleep(0.005)
+        time.sleep(0.08)                      # rest of the frame lags well past 20 ms
         os.write(cam_m, IDLE[0][3:])          # camera finishes its frame
         got = read_exact(ptz_m, 5 + len(ZOOM_IN))
         assert got == IDLE[0][3:] + ZOOM_IN   # probe after, not inside, the frame
@@ -207,4 +277,70 @@ def test_bridge_probe_waits_for_camera_frame_boundary():
     assert '"d":"mark","note":"pan test"' in log.getvalue()
     assert f'"d":"h2p","x":"{ZOOM_IN.hex()}"' in log.getvalue()
     for fd in (cam_m, cam_s, ptz_m, ptz_s, ctl_r, ctl_w):
+        os.close(fd)
+
+
+def test_replay_includes_bridge_probes_in_capture_order():
+    from uart_bridge.log import H2P, Record
+    recs = [Record(0, C2P, IDLE[0]), Record(10, H2P, ZOOM_IN), Record(20, P2C, REPLY),
+            Record(50, C2P, IDLE[1])]
+    assert inject.schedule_replay(recs) == [(0, IDLE[0]), (10, ZOOM_IN), (50, IDLE[1])]
+
+
+def test_diff_treats_probe_and_camera_command_to_ptz_alike():
+    from uart_bridge.log import H2P
+    idle = idle_stream(BODIES)
+    a = events_from(with_command(idle, 60, ZOOM_IN))
+    b = events_from(with_command(idle, 60, ZOOM_IN))
+    b[60].d = H2P                          # same bytes, sent by the host as a probe
+    assert analysis.diff(a, b) == []
+
+
+def test_capture_never_overwritten(tmp_path):
+    import pytest
+    from uart_bridge.cli import open_log
+    p = tmp_path / "c.jsonl"
+    open_log(p, "bridge")[1].close()
+    with pytest.raises(SystemExit):
+        open_log(p, "bridge")
+
+
+def test_decode_shows_trailing_incomplete_frame(tmp_path, capsys):
+    from uart_bridge.cli import main
+    p = tmp_path / "c.jsonl"
+    with open(p, "w") as fp:
+        w = LogWriter(fp, {"mode": "test"})
+        w.data(0, C2P, IDLE[0] + IDLE[1][:3])
+    main(["decode", str(p)])
+    assert "incomplete a5 31 9e" in capsys.readouterr().out
+
+
+def test_nonfinite_rates_rejected():
+    import pytest
+    from uart_bridge.cli import build_parser
+    for argv in (["inject", "--frame", "a5", "--rate", "inf"], ["inject", "--frame", "a5", "--duration", "nan"]):
+        with pytest.raises(SystemExit):
+            build_parser().parse_args(argv)
+    with pytest.raises(ValueError):
+        inject.schedule_frames([IDLE[0]], rate=float("inf"), duration=1)
+
+
+def test_stale_input_is_drained_not_forwarded():
+    cam_m, cam_path, cam_s = pty_port()
+    ptz_m, ptz_path, ptz_s = pty_port()
+    cam = bridge.open_port(cam_path, 115200)
+    ptz = bridge.open_port(ptz_path, 115200)
+    os.write(cam_m, b"\xa4\xda\xc2\xc2" + IDLE[0] * 50)   # backlog from before the bridge ran
+    time.sleep(0.02)
+    assert bridge.drain_stale(cam) == 4 + 8 * 50
+    stopper = bridge.Stopper()
+    th = threading.Thread(target=bridge.run, args=(cam, ptz, LogWriter(io.StringIO(), {}), stopper))
+    th.start()
+    try:
+        os.write(cam_m, IDLE[1])
+        assert read_exact(ptz_m, 64, timeout=0.5) == IDLE[1]   # only live traffic reaches the board
+    finally:
+        stopper.stop = True
+        th.join(2)
+    for fd in (cam_m, cam_s, ptz_m, ptz_s):
         os.close(fd)

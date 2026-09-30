@@ -6,6 +6,7 @@ camera then has no path to the PTZ board, so the host is the only sender.
 
 from __future__ import annotations
 
+import math
 import selectors
 import time
 from typing import Callable
@@ -13,20 +14,27 @@ from typing import Callable
 import serial
 
 from .bridge import Stats, Stopper
-from .log import C2P, P2C, LogWriter
+from .log import C2P, H2P, P2C, LogWriter
 
 
 def schedule_replay(records, speed: float = 1.0) -> list[tuple[int, bytes]]:
-    """(offset_ns, bytes) for each c2p record, relative to the first one."""
-    c2p = [r for r in records if r.d == C2P]
-    if not c2p:
+    """(offset_ns, bytes) for every record that went to the PTZ board, camera
+    traffic and bridge probes alike, in capture order, relative to the first."""
+    if not (speed > 0 and math.isfinite(speed)):
+        raise ValueError(f"speed must be finite and > 0, got {speed}")
+    sent = [r for r in records if r.d in (C2P, H2P)]
+    if not sent:
         return []
-    base = c2p[0].t
-    return [(int((r.t - base) / speed), r.data) for r in c2p]
+    base = sent[0].t
+    return [(int((r.t - base) / speed), r.data) for r in sent]
 
 
 def schedule_frames(frames: list[bytes], rate: float, duration: float) -> list[tuple[int, bytes]]:
     """Cycle through `frames` at `rate` frames/s for `duration` seconds."""
+    if not all(v > 0 and math.isfinite(v) for v in (rate, duration)):
+        raise ValueError(f"rate and duration must be finite and > 0, got {rate}, {duration}")
+    if not frames:
+        raise ValueError("no frames to send")
     period = int(1e9 / rate)
     count = max(1, int(duration * rate))
     return [(i * period, frames[i % len(frames)]) for i in range(count)]
@@ -53,11 +61,12 @@ def run(
             while i < len(schedule) and schedule[i][0] <= now:
                 data = schedule[i][1]
                 ptz.write(data)
-                writer.data(now, C2P, data)
+                t = time.monotonic_ns() - t0  # when it was written, not when it was due
+                writer.data(t, C2P, data)
                 stats.bytes[C2P] += len(data)
                 stats.reads[C2P] += 1
                 if on_data:
-                    on_data(now, C2P, data)
+                    on_data(t, C2P, data)
                 i += 1
             if i >= len(schedule):
                 if end is None:

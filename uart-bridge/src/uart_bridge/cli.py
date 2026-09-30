@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import math
+import os
 import sys
 from pathlib import Path
 
@@ -13,7 +15,7 @@ from .log import C2P, H2P, MARK, P2C, LogWriter, read_log
 
 DEFAULT_CAM = "/dev/ttyUSB0"
 DEFAULT_PTZ = "/dev/ttyUSB1"
-ARROW = {C2P: "cam->ptz", P2C: "ptz->cam", H2P: "host->ptz"}
+ARROW = {C2P: "cam->ptz", P2C: "ptz->cam", H2P: "host->ptz", analysis.TO_PTZ: "->ptz"}
 
 
 def fmt_t(t: int) -> str:
@@ -25,14 +27,17 @@ class Printer:
     when its key() differs from the previous frame in the same direction; the
     repeat count of that previous frame is shown on the same line."""
 
-    def __init__(self, collapse: bool = True, out=sys.stdout):
+    def __init__(self, collapse: bool = True, out=None):
         self.collapse = collapse
-        self.out = out
+        self.out = out or sys.stdout
         self.framers = analysis.framers()
         self.last_key: dict[str, str] = {}
         self.repeat: dict[str, int] = {}
+        self.last_t = 0
+        self.dir_t: dict[str, int] = {}
 
     def data(self, t: int, d: str, data: bytes) -> None:
+        self.dir_t[d] = t
         for item in self.framers[d].feed(t, data):
             if isinstance(item, Frame):
                 self.frame(item.t, d, item.data)
@@ -40,13 +45,26 @@ class Printer:
                 self.line(item.t, d, f"junk {item.data.hex(' ')}")
 
     def frame(self, t: int, d: str, data: bytes) -> None:
-        k = codec.key(data)
+        k = codec.key(data, strict_a5=True)  # show A5 body changes
         if self.collapse and k == self.last_key.get(d):
             self.repeat[d] += 1
             return
         prev = f"  (prev x{self.repeat[d] + 1})" if self.collapse and d in self.last_key else ""
         self.last_key[d], self.repeat[d] = k, 0
+        self.last_t = t
         self.line(t, d, f"{data.hex(' ')}  {codec.decode(data).text}{prev}")
+
+    def flush(self) -> None:
+        """Print what is still pending at the end: repeat counts of the last
+        frame in each direction, and bytes of a frame that never completed."""
+        for d, n in self.repeat.items():
+            if self.collapse and n:
+                self.line(self.last_t, d, f"(last frame x{n + 1})")
+                self.repeat[d] = 0
+        for d, f in self.framers.items():
+            if f.pending():
+                self.line(self.dir_t.get(d, 0), d, f"incomplete {f.pending().hex(' ')}")
+                f.buf.clear()
 
     def mark(self, t: int, note: str) -> None:
         print(f"{fmt_t(t)}  ---- {note}", file=self.out)
@@ -56,14 +74,18 @@ class Printer:
 
 
 def default_log(mode: str) -> Path:
-    stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     return Path("captures") / f"{stamp}-{mode}.jsonl"
 
 
 def open_log(path: Path | None, mode: str):
+    """Create the capture file; never overwrite an existing capture."""
     path = path or default_log(mode)
     path.parent.mkdir(parents=True, exist_ok=True)
-    return path, open(path, "w")
+    try:
+        return path, open(path, "x")
+    except FileExistsError:
+        raise SystemExit(f"{path} already exists; not overwriting a capture")
 
 
 def print_stats(stats, path: Path) -> None:
@@ -82,12 +104,13 @@ def cmd_bridge(a: argparse.Namespace) -> int:
         latency = {p: bridge.set_latency(p, a.latency) for p in (a.cam, a.ptz)}
     cam = bridge.open_port(a.cam, a.baud)
     ptz = bridge.open_port(a.ptz, a.ptz_baud or a.baud)
+    stale = {"cam": bridge.drain_stale(cam), "ptz": bridge.drain_stale(ptz)}
     path, fp = open_log(a.log, "bridge")
     with fp:
         writer = LogWriter(fp, {
             "mode": "bridge", "cam": a.cam, "ptz": a.ptz,
             "baud": a.baud, "ptz_baud": a.ptz_baud or a.baud, "latency": latency,
-            "note": a.note or "",
+            "stale_dropped": stale, "note": a.note or "",
         })
         stopper = bridge.Stopper()
         stopper.install()
@@ -100,6 +123,8 @@ def cmd_bridge(a: argparse.Namespace) -> int:
                            on_data=printer.data if printer else None,
                            control=control, duration=a.duration,
                            on_mark=printer.mark if printer else None)
+        if printer:
+            printer.flush()
     cam.close()
     ptz.close()
     print_stats(stats, path)
@@ -122,16 +147,19 @@ def cmd_inject(a: argparse.Namespace) -> int:
         return 1
     latency = bridge.set_latency(a.ptz, a.latency) if a.latency else ""
     ptz = bridge.open_port(a.ptz, a.ptz_baud)
+    stale = bridge.drain_stale(ptz)
     path, fp = open_log(a.log, "inject")
     with fp:
         writer = LogWriter(fp, {"mode": "inject", "ptz": a.ptz, "ptz_baud": a.ptz_baud,
-                                "latency": latency, **source})
+                                "latency": latency, "stale_dropped": stale, **source})
         stopper = bridge.Stopper()
         stopper.install()
         printer = None if a.quiet else Printer(collapse=not a.all)
         print(f"injecting {len(schedule)} writes into {a.ptz}, logging to {path}", file=sys.stderr)
         stats = inject.run(ptz, schedule, writer, stopper,
                            on_data=printer.data if printer else None, tail=a.tail)
+        if printer:
+            printer.flush()
     ptz.close()
     print_stats(stats, path)
     return 0
@@ -147,6 +175,7 @@ def cmd_decode(a: argparse.Namespace) -> int:
             printer.mark(r.t, r.note)
         elif a.dir in ("both", r.d):
             printer.data(r.t, r.d, r.data)
+    printer.flush()
     s = analysis.summarize(analysis.events(records))
     lo, mean, hi = s.c2p_period_ms
     print(f"# {s.duration_s:.1f}s  frames c2p={s.frames[C2P]} p2c={s.frames[P2C]} h2p={s.frames[H2P]}  "
@@ -163,14 +192,22 @@ def cmd_diff(a: argparse.Namespace) -> int:
         s = analysis.summarize(evs)
         print(f"{name}: {s.duration_s:.1f}s frames c2p={s.frames[C2P]} p2c={s.frames[P2C]} "
               f"junk c2p={s.junk_bytes[C2P]} p2c={s.junk_bytes[P2C]} rate={s.c2p_rate:.2f}/s")
-    divs = analysis.diff(ea, eb, tolerance=a.tolerance, keep_edges=a.keep_edges)
+    divs = analysis.diff(ea, eb, tolerance=a.tolerance, time_tolerance_ms=a.time_tolerance,
+                         strict_a5=a.strict_a5, ignore_edges=a.ignore_edges)
     for dv in divs:
-        print(f"\n{ARROW[dv.d]} {dv.op}")
+        print(f"\n{ARROW[dv.d]} {dv.op} {dv.detail}".rstrip())
         for side, segs in (("A", dv.a), ("B", dv.b)):
             for s in segs:
                 print(f"  {side} {fmt_t(s.t)} x{s.count:<4} {s.key}")
     print(f"\n{len(divs)} divergence(s)")
     return 1 if divs else 0
+
+
+def positive(text: str) -> float:
+    v = float(text)
+    if not (v > 0 and math.isfinite(v)):
+        raise argparse.ArgumentTypeError(f"must be finite and > 0, got {text}")
+    return v
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -183,7 +220,7 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--baud", type=int, default=115200)
     b.add_argument("--ptz-baud", type=int, help="PTZ side baud if it differs from --baud")
     b.add_argument("--log", type=Path, help="capture file (default captures/<time>-bridge.jsonl)")
-    b.add_argument("--duration", type=float, help="stop after N seconds")
+    b.add_argument("--duration", type=positive, help="stop after N seconds")
     b.add_argument("--note", help="free text stored in the capture header")
     b.add_argument("--latency", type=int, default=1,
                    help="FTDI latency timer in ms, set via sysfs (0 = leave as is; default 1)")
@@ -199,9 +236,9 @@ def build_parser() -> argparse.ArgumentParser:
     src = i.add_mutually_exclusive_group(required=True)
     src.add_argument("--replay", type=Path, help="replay the cam->ptz stream of a capture")
     src.add_argument("--frame", action="append", help="hex frame to send; repeat to cycle several")
-    i.add_argument("--speed", type=float, default=1.0, help="replay speed factor")
-    i.add_argument("--rate", type=float, default=20.0, help="frames/s for --frame")
-    i.add_argument("--duration", type=float, default=1.0, help="seconds to send --frame for")
+    i.add_argument("--speed", type=positive, default=1.0, help="replay speed factor")
+    i.add_argument("--rate", type=positive, default=20.0, help="frames/s for --frame")
+    i.add_argument("--duration", type=positive, default=1.0, help="seconds to send --frame for")
     i.add_argument("--tail", type=float, default=0.5, help="seconds to keep listening afterwards")
     i.add_argument("--log", type=Path)
     i.add_argument("--latency", type=int, default=1)
@@ -220,8 +257,12 @@ def build_parser() -> argparse.ArgumentParser:
     f.add_argument("b", type=Path)
     f.add_argument("--tolerance", type=int, default=3,
                    help="allowed repeat-count difference per segment, in frames")
-    f.add_argument("--keep-edges", action="store_true",
-                   help="also report unmatched runs where the captures start and end")
+    f.add_argument("--time-tolerance", type=positive, default=150.0,
+                   help="allowed difference in segment span and spacing, ms (default 150)")
+    f.add_argument("--strict-a5", action="store_true",
+                   help="compare A5 frame bytes 0-6, not just their presence and cadence")
+    f.add_argument("--ignore-edges", action="store_true",
+                   help="drop unmatched runs at the capture ends (for --strict-a5)")
     f.set_defaults(func=cmd_diff)
     return p
 
@@ -231,6 +272,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return a.func(a)
     except BrokenPipeError:
+        # Reader went away (`| head`); keep the interpreter from complaining
+        # again while it flushes stdout at exit.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
         return 0
 
 
