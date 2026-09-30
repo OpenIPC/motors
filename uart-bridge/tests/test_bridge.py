@@ -68,6 +68,7 @@ def test_bridge_forwards_both_ways_and_logs(tmp_path):
     th = threading.Thread(target=bridge.run, args=(cam, ptz, LogWriter(log, {}), stopper))
     th.start()
     try:
+        time.sleep(0.02)  # the bridge joins the camera stream after a quiet gap
         payload = b"".join(IDLE)
         os.write(cam_m, payload)
         assert read_exact(ptz_m, len(payload)) == payload
@@ -246,7 +247,13 @@ def test_codec_decodes_pelco_and_replies():
     d = codec.decode(ZOOM_IN)
     assert d.ok and d.fields["actions"] == ["zoom+"] and d.text == "pelco addr=1 zoom+"
     assert codec.decode(bytes.fromhex("c50100000000015c")).text == "pelco addr=1 stop"
-    assert "!cksum" in codec.decode(bytes.fromhex("c50100200000015c")).text
+    assert "ck=01!=21" in codec.decode(bytes.fromhex("c50100200000015c")).text
+    # Captured from the stock firmware (e1-stock): sum % 256, iris bits, presets.
+    assert codec.decode(bytes.fromhex("c50100800000815c")).text == "pelco addr=1 focus-far"
+    assert codec.decode(bytes.fromhex("c50104000000055c")).text == "pelco addr=1 iris-close"
+    assert codec.decode(bytes.fromhex("c50100030005095c")).text == "pelco addr=1 set-preset 00 05"
+    assert codec.decode(bytes.fromhex("c50100070005 0d5c".replace(" ", ""))).fields["extended"] == "goto-preset"
+    assert codec.decode(bytes.fromhex("ef01000a04032f2e202020202020")).text == "reply type=00 zoom report blank"
     r = codec.decode(REPLY)
     assert r.fields["zoom"] == "X1.3" and r.fields["type"] == 0
     assert codec.decode(bytes.fromhex("ef01020101")).text == "reply night"
@@ -264,6 +271,7 @@ def test_bridge_probe_waits_for_camera_frame_boundary():
                           kwargs={"control": ctl_r})
     th.start()
     try:
+        time.sleep(0.02)
         os.write(cam_m, IDLE[0][:3])          # camera frame in flight
         assert read_exact(ptz_m, 3) == IDLE[0][:3]
         os.write(ctl_w, b"pan test\n!" + ZOOM_IN.hex().encode() + b"\n")
@@ -332,15 +340,111 @@ def test_stale_input_is_drained_not_forwarded():
     ptz = bridge.open_port(ptz_path, 115200)
     os.write(cam_m, b"\xa4\xda\xc2\xc2" + IDLE[0] * 50)   # backlog from before the bridge ran
     time.sleep(0.02)
-    assert bridge.drain_stale(cam) == 4 + 8 * 50
+    assert bridge.drain_stale(cam).bytes == 4 + 8 * 50
     stopper = bridge.Stopper()
     th = threading.Thread(target=bridge.run, args=(cam, ptz, LogWriter(io.StringIO(), {}), stopper))
     th.start()
     try:
+        time.sleep(0.02)
         os.write(cam_m, IDLE[1])
         assert read_exact(ptz_m, 64, timeout=0.5) == IDLE[1]   # only live traffic reaches the board
     finally:
         stopper.stop = True
         th.join(2)
     for fd in (cam_m, cam_s, ptz_m, ptz_s):
+        os.close(fd)
+
+
+def run_bridge_thread(cam, ptz, log=None, **kw):
+    stopper = bridge.Stopper()
+    th = threading.Thread(target=bridge.run, args=(cam, ptz, LogWriter(log or io.StringIO(), {}), stopper),
+                          kwargs=kw)
+    th.start()
+    return stopper, th
+
+
+def test_pty_camera_side_reaches_ptz_board():
+    ptz_m, ptz_path, ptz_s = pty_port()
+    cam = bridge.PtyPort()
+    ptz = bridge.open_port(ptz_path, 115200)
+    stopper, th = run_bridge_thread(cam, ptz)
+    try:
+        time.sleep(0.02)
+        tool = os.open(cam.path, os.O_RDWR | os.O_NOCTTY)   # the program under test
+        os.write(tool, ZOOM_IN)
+        assert read_exact(ptz_m, 8) == ZOOM_IN
+        os.write(ptz_m, REPLY)
+        os.set_blocking(tool, False)
+        assert read_exact(tool, len(REPLY)) == REPLY
+        os.close(tool)
+    finally:
+        stopper.stop = True
+        th.join(2)
+    cam.close()
+    for fd in (ptz_m, ptz_s):
+        os.close(fd)
+
+
+def test_bridge_joins_camera_stream_only_at_a_frame_start():
+    cam_m, cam_path, cam_s = pty_port()
+    ptz_m, ptz_path, ptz_s = pty_port()
+    cam = bridge.open_port(cam_path, 115200)
+    ptz = bridge.open_port(ptz_path, 115200)
+    log = io.StringIO()
+    stopper, th = run_bridge_thread(cam, ptz, log)
+    try:
+        time.sleep(0.02)
+        os.write(cam_m, IDLE[0][3:])           # tail of a frame already in flight (contains no gap)
+        time.sleep(0.001)
+        os.write(cam_m, IDLE[0][5:])           # still mid-stream, no quiet gap before it
+        time.sleep(0.03)                        # the inter-frame gap
+        os.write(cam_m, IDLE[1])
+        assert read_exact(ptz_m, 32, timeout=0.5) == IDLE[1]
+    finally:
+        stopper.stop = True
+        th.join(2)
+    assert "joined camera mid-frame" in log.getvalue()
+    for fd in (cam_m, cam_s, ptz_m, ptz_s):
+        os.close(fd)
+
+
+def test_bridge_completes_frame_in_flight_on_exit():
+    cam_m, cam_path, cam_s = pty_port()
+    ptz_m, ptz_path, ptz_s = pty_port()
+    cam = bridge.open_port(cam_path, 115200)
+    ptz = bridge.open_port(ptz_path, 115200)
+    stopper, th = run_bridge_thread(cam, ptz)
+    try:
+        time.sleep(0.02)
+        os.write(cam_m, IDLE[0][:3])
+        assert read_exact(ptz_m, 3) == IDLE[0][:3]
+        stopper.stop = True                      # stop while the frame is half forwarded
+        time.sleep(0.08)                         # loop has left select, finish window is open
+        os.write(cam_m, IDLE[0][3:] + IDLE[1])   # rest of the frame, then a whole new one
+        th.join(2)
+        assert read_exact(ptz_m, 16, timeout=0.3) == IDLE[0][3:]   # completed, nothing more
+    finally:
+        stopper.stop = True
+        th.join(2)
+    for fd in (cam_m, cam_s, ptz_m, ptz_s):
+        os.close(fd)
+
+
+def test_quiet_camera_line_first_frame_is_forwarded_immediately():
+    cam = bridge.PtyPort()
+    ptz_m, ptz_path, ptz_s = pty_port()
+    ptz = bridge.open_port(ptz_path, 115200)
+    drained = bridge.drain_stale(cam)
+    assert drained.last_ns is None
+    stopper, th = run_bridge_thread(cam, ptz, cam_last_ns=drained.last_ns)
+    try:
+        tool = os.open(cam.path, os.O_RDWR | os.O_NOCTTY)
+        os.write(tool, IDLE[0])                 # right away, like xm-uart's init[]
+        assert read_exact(ptz_m, 8) == IDLE[0]
+        os.close(tool)
+    finally:
+        stopper.stop = True
+        th.join(2)
+    cam.close()
+    for fd in (ptz_m, ptz_s):
         os.close(fd)

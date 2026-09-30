@@ -28,6 +28,8 @@ uv run uart-bridge inject --replay stock.jsonl  # host acts as camera, replays c
 uv run uart-bridge inject --frame a52e9eea2662efae --rate 20 --duration 2
 ```
 
+- `bridge --cam pty` creates a pseudo terminal in place of the camera port and prints its path once forwarding has started. A local program under test (for example `xm-uart-motors-host -d /dev/pts/N`) then plays the camera against the real PTZ board, and every byte is logged. `scripts/xm_uart_audit.py tool` does this with a scripted key sequence.
+- The bridge never leaves a partial frame on the PTZ wire. The XM board starts an 8-byte frame at any `A5`/`C5` byte and has no inter-byte timeout (see `xm-uart/PROTOCOL.md`), so a stray byte silently eats the next command. Forwarding of camera bytes therefore starts only after a quiet gap on the camera line; bytes before it are logged as a mark, not forwarded. On exit, the bridge finishes forwarding the frame in flight.
 - While `bridge` runs, each line on stdin is stored in the log as a timestamped mark, for example `pan left pressed`. A line of the form `!<hex>` is sent to the PTZ board as a probe and logged as `h2p`. A probe waits for the end of any camera frame in flight, so it never splices into one. If the camera stops mid-frame for 1 s, the probe goes out anyway and the stall is logged as a mark. For example, xm-uart's zoom-in then stop:
   `( sleep 2; echo '!c50100200000215c'; sleep .5; echo '!c50100000000015c'; sleep 2 ) | uv run uart-bridge bridge --duration 6`
 - `bridge` and `inject` open the ports exclusively and set the FTDI latency timer to 1 ms through sysfs, using `--latency` (0 leaves it alone). The default is 16 ms, which makes every timestamp late by up to 16 ms.
@@ -61,15 +63,17 @@ A capture's first and last segment is cut by the capture itself, so its count an
 
 By default an `A5` frame is compared only as the class `a5`. Its bytes follow a per-second counter whose phase depends on when the camera booted, and the scramble is not decoded yet. The diff therefore checks that the stream is there and keeps its cadence, not what it carries. `--strict-a5` compares bytes 0–6. Combine it with `--ignore-edges` for two captures whose counters run in step. Other frames (Pelco commands, PTZ replies) are always compared byte for byte.
 
-## Protocol notes (stock firmware, camera → PTZ)
+## Protocol
 
-Status is in `src/uart_bridge/codec.py`.
-- **Line:** 115200 8N1, 8-byte frames starting with `A5`, sent every 50 ms (20/s) even when idle.
-- **Byte 1:** a counter XOR `0x25` that increments once per second.
-- **Byte 2:** `9E`.
-- **Bytes 3–6:** scrambled together with the counter, not decoded yet. The two low bits of byte 6 flip for single frames.
-- **Byte 7:** changes in every frame.
+The XM camera ↔ lens board protocol is specified in [`xm-uart/PROTOCOL.md`](../xm-uart/PROTOCOL.md), measured with this tool. `codec.py` decodes what that spec establishes. The recordings behind it are in `xm-uart/captures/`; `e1-stock.jsonl` is the stock firmware reference to diff an implementation against.
 
-When the camera receives zoom reports, the low byte of its `A5` frames changes every frame, until about 2 s after the zoom stops. That looks like the camera's autofocus loop.
+## Reproducing the measurements
 
-The PTZ board **does not answer `A5` frames**, not even xm-uart's `init[]`. It does answer the XM Pelco-D variant `C5|FF addr c1 c2 d1 d2 ck 5C`, where `ck = sum % 100`. While the zoom moves, it replies with `EF 01 <type> <len> <payload>`. For type 00 the payload is `04 03 2F 2E "X1.6 "`, a zoom-ratio report. An idle camera sends only `A5` frames, so an idle capture has no `p2c` traffic, and that is expected.
+`scripts/xm_uart_audit.py` re-runs the experiments on a rig:
+- `stock`: the stock firmware, driven through DVRIP with python-dvr;
+- `accept`: which frame variants the board acts on, and the partial-frame trap;
+- `tool <binary>`: a program under test through the pty;
+- `focus`: RTSP sharpness;
+- `restore` / `refocus`: put the lens back afterwards.
+
+Run `uv run scripts/xm_uart_audit.py -h` for the options.

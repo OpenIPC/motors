@@ -101,10 +101,15 @@ def cmd_bridge(a: argparse.Namespace) -> int:
 
     latency = {}
     if a.latency:
-        latency = {p: bridge.set_latency(p, a.latency) for p in (a.cam, a.ptz)}
-    cam = bridge.open_port(a.cam, a.baud)
+        latency = {p: bridge.set_latency(p, a.latency) for p in (a.cam, a.ptz) if p != "pty"}
+    if a.cam == "pty":
+        cam = bridge.PtyPort()
+        a.cam = cam.path
+    else:
+        cam = bridge.open_port(a.cam, a.baud)
     ptz = bridge.open_port(a.ptz, a.ptz_baud or a.baud)
-    stale = {"cam": bridge.drain_stale(cam), "ptz": bridge.drain_stale(ptz)}
+    cam_drain, ptz_drain = bridge.drain_stale(cam), bridge.drain_stale(ptz)
+    stale = {"cam": cam_drain.bytes, "ptz": ptz_drain.bytes}
     path, fp = open_log(a.log, "bridge")
     with fp:
         writer = LogWriter(fp, {
@@ -116,13 +121,19 @@ def cmd_bridge(a: argparse.Namespace) -> int:
         stopper.install()
         printer = None if a.quiet else Printer(collapse=not a.all)
         control = None if a.no_stdin else sys.stdin.fileno()
+        if isinstance(cam, bridge.PtyPort):
+            # Only now: anything the tool writes before this point would have
+            # been discarded by drain_stale() as pre-bridge input.
+            print(f"camera side is a pty: point the tool under test at {cam.path}",
+                  file=sys.stderr, flush=True)
         print(f"bridging {a.cam} <-> {a.ptz}, logging to {path}"
               + ("; a line on stdin adds a mark, !<hex> sends a probe to the PTZ board"
                  if control is not None else ""), file=sys.stderr)
         stats = bridge.run(cam, ptz, writer, stopper,
                            on_data=printer.data if printer else None,
                            control=control, duration=a.duration,
-                           on_mark=printer.mark if printer else None)
+                           on_mark=printer.mark if printer else None,
+                           cam_last_ns=cam_drain.last_ns)
         if printer:
             printer.flush()
     cam.close()
@@ -147,7 +158,7 @@ def cmd_inject(a: argparse.Namespace) -> int:
         return 1
     latency = bridge.set_latency(a.ptz, a.latency) if a.latency else ""
     ptz = bridge.open_port(a.ptz, a.ptz_baud)
-    stale = bridge.drain_stale(ptz)
+    stale = bridge.drain_stale(ptz).bytes
     path, fp = open_log(a.log, "inject")
     with fp:
         writer = LogWriter(fp, {"mode": "inject", "ptz": a.ptz, "ptz_baud": a.ptz_baud,
@@ -215,7 +226,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     b = sub.add_parser("bridge", help="forward camera <-> PTZ board and log both directions")
-    b.add_argument("--cam", default=DEFAULT_CAM, help=f"camera-side port (default {DEFAULT_CAM})")
+    b.add_argument("--cam", default=DEFAULT_CAM,
+                   help=f"camera-side port (default {DEFAULT_CAM}); 'pty' creates a pseudo terminal "
+                        "so a local program under test plays the camera")
     b.add_argument("--ptz", default=DEFAULT_PTZ, help=f"PTZ-board-side port (default {DEFAULT_PTZ})")
     b.add_argument("--baud", type=int, default=115200)
     b.add_argument("--ptz-baud", type=int, help="PTZ side baud if it differs from --baud")
