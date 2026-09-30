@@ -28,6 +28,8 @@ C2P = "c2p"
 P2C = "p2c"
 H2P = "h2p"  # injected by the host into the PTZ side during a bridge run
 C2M = "c2m"  # camera bytes logged but NOT forwarded (bridge --mute-cam)
+C2T = "c2t"  # camera frames also sent to the tee (bridge --tee), e.g. a second board
+T2C = "t2c"  # what the tee sent back (that second board's replies)
 MARK = "mark"
 
 

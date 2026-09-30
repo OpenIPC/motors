@@ -7,16 +7,17 @@ from dataclasses import dataclass
 
 from . import codec
 from .framing import CAM_RULES, PTZ_RULES, Frame, Framer
-from .log import C2M, C2P, H2P, MARK, P2C, Record
+from .log import C2M, C2P, C2T, H2P, MARK, P2C, T2C, Record
 
-RULES = {C2P: CAM_RULES, H2P: CAM_RULES, P2C: PTZ_RULES, C2M: CAM_RULES}
-DIRECTIONS = (C2P, H2P, P2C, C2M)
+RULES = {C2P: CAM_RULES, H2P: CAM_RULES, P2C: PTZ_RULES, C2M: CAM_RULES,
+         C2T: CAM_RULES, T2C: PTZ_RULES}
+DIRECTIONS = (C2P, H2P, P2C, C2M, C2T, T2C)
 # diff compares what the PTZ board received, whoever sent it: camera traffic
 # and bridge probes (or inject writes, logged c2p) are one stream.
 TO_PTZ = "to-ptz"
 # Muted camera output (c2m) never reached the board; it is compared as its own
 # stream, not as board traffic.
-STREAMS = {TO_PTZ: (C2P, H2P), P2C: (P2C,), C2M: (C2M,)}
+STREAMS = {TO_PTZ: (C2P, H2P), P2C: (P2C,), C2M: (C2M,), C2T: (C2T,), T2C: (T2C,)}
 
 
 def framers() -> dict[str, Framer]:

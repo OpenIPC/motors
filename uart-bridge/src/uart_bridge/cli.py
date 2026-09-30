@@ -12,11 +12,12 @@ from pathlib import Path
 
 from . import analysis, codec
 from .framing import Frame
-from .log import C2M, C2P, H2P, MARK, P2C, LogWriter, read_log
+from .log import C2M, C2P, C2T, H2P, MARK, P2C, T2C, LogWriter, read_log
 
 DEFAULT_CAM = "/dev/ttyUSB0"
 DEFAULT_PTZ = "/dev/ttyUSB1"
-ARROW = {C2P: "cam->ptz", P2C: "ptz->cam", H2P: "host->ptz", C2M: "cam-x-ptz", analysis.TO_PTZ: "->ptz"}
+ARROW = {C2P: "cam->ptz", P2C: "ptz->cam", H2P: "host->ptz", C2M: "cam-x-ptz",
+         C2T: "cam->tee", T2C: "tee->", analysis.TO_PTZ: "->ptz"}
 
 
 def fmt_t(t: int) -> str:
@@ -94,8 +95,8 @@ def open_log(path: Path | None, mode: str):
 
 def print_stats(stats, path: Path) -> None:
     print(f"\nlog: {path}", file=sys.stderr)
-    for d in (C2P, P2C, H2P, C2M):
-        if d in (H2P, C2M) and not stats.reads[d]:
+    for d in (C2P, P2C, H2P, C2M, C2T, T2C):
+        if d in (H2P, C2M, C2T, T2C) and not stats.reads[d]:
             continue
         print(f"  {ARROW[d]}: {stats.bytes[d]} bytes in {stats.reads[d]} reads", file=sys.stderr)
 
@@ -105,13 +106,15 @@ def cmd_bridge(a: argparse.Namespace) -> int:
 
     latency = {}
     if a.latency:
-        latency = {p: bridge.set_latency(p, a.latency) for p in (a.cam, a.ptz) if p != "pty"}
+        latency = {p: bridge.set_latency(p, a.latency) for p in (a.cam, a.ptz)
+                   if p != "pty" and not bridge.is_url(p)}
     if a.cam == "pty":
         cam = bridge.PtyPort()
         a.cam = cam.path
     else:
         cam = bridge.open_port(a.cam, a.baud)
     ptz = bridge.open_port(a.ptz, a.ptz_baud or a.baud)
+    tee = bridge.open_port(a.tee, a.ptz_baud or a.baud) if a.tee else None
     cam_drain, ptz_drain = bridge.drain_stale(cam), bridge.drain_stale(ptz)
     stale = {"cam": cam_drain.bytes, "ptz": ptz_drain.bytes}
     path, fp = open_log(a.log, "bridge")
@@ -119,7 +122,8 @@ def cmd_bridge(a: argparse.Namespace) -> int:
         writer = LogWriter(fp, {
             "mode": "bridge", "cam": a.cam, "ptz": a.ptz,
             "baud": a.baud, "ptz_baud": a.ptz_baud or a.baud, "latency": latency,
-            "stale_dropped": stale, "mute_cam": a.mute_cam, "note": a.note or "",
+            "stale_dropped": stale, "mute_cam": a.mute_cam, "tee": a.tee or "",
+            "note": a.note or "",
         })
         stopper = bridge.Stopper()
         stopper.install()
@@ -137,11 +141,13 @@ def cmd_bridge(a: argparse.Namespace) -> int:
                            on_data=printer.data if printer else None,
                            control=control, duration=a.duration,
                            on_mark=printer.mark if printer else None,
-                           cam_last_ns=cam_drain.last_ns, mute_cam=a.mute_cam)
+                           cam_last_ns=cam_drain.last_ns, mute_cam=a.mute_cam, tee=tee)
         if printer:
             printer.flush()
     cam.close()
     ptz.close()
+    if tee is not None:
+        tee.close()
     print_stats(stats, path)
     return 0
 
@@ -184,7 +190,7 @@ def cmd_inject(a: argparse.Namespace) -> int:
 def counts(s: analysis.Summary) -> str:
     """Frames and junk bytes per direction: c2p and p2c always, h2p and the
     muted c2m whenever they carry anything, so noise in them is not hidden."""
-    dirs = [d for d in (C2P, P2C, H2P, C2M)
+    dirs = [d for d in (C2P, P2C, H2P, C2M, C2T, T2C)
             if d in (C2P, P2C) or s.frames[d] or s.junk_bytes[d]]
     return ("frames " + " ".join(f"{d}={s.frames[d]}" for d in dirs)
             + "  junk bytes " + " ".join(f"{d}={s.junk_bytes[d]}" for d in dirs))
@@ -206,6 +212,59 @@ def cmd_decode(a: argparse.Namespace) -> int:
     print(f"# {s.duration_s:.1f}s  {counts(s)}  "
           f"c2p rate={s.c2p_rate:.2f}/s period min/mean/max={lo:.1f}/{mean:.1f}/{hi:.1f} ms")
     return 0
+
+
+def zoom_reports(records, d: str) -> list[tuple[int, float]]:
+    """(t, zoom) for every zoom report in direction d."""
+    out = []
+    for ev in analysis.events([r for r in records if r.d == d]):
+        if ev.kind == "frame":
+            z = codec.decode(ev.data).fields.get("zoom")
+            if z and z.startswith("X"):
+                out.append((ev.t, float(z[1:])))
+    return out
+
+
+def settled(reports: list[tuple[int, float]], gap_s: float = 1.0) -> list[tuple[int, float]]:
+    """Where each movement ended: the last report before a pause of gap_s."""
+    out = []
+    for i, (t, z) in enumerate(reports):
+        if i + 1 == len(reports) or reports[i + 1][0] - t > gap_s * 1e9:
+            out.append((t, z))
+    return out
+
+
+def cmd_boards(a: argparse.Namespace) -> int:
+    """Compare two lens boards driven by the same traffic: the vendor board
+    (p2c) against the tee'd board (t2c) of one bridge capture, or against the
+    p2c of a second capture (e.g. an inject replay)."""
+    _, ra = read_log(a.a)
+    first = zoom_reports(ra, P2C)
+    if a.b:
+        _, rb = read_log(a.b)
+        second, label = zoom_reports(rb, P2C), str(a.b)
+    else:
+        second, label = zoom_reports(ra, T2C), "tee (t2c)"
+    sa, sb = settled(first), settled(second)
+    print(f"A = {a.a} p2c: {len(first)} reports, {len(sa)} settled positions")
+    print(f"B = {label}: {len(second)} reports, {len(sb)} settled positions")
+    worst = 0.0
+    for i in range(max(len(sa), len(sb))):
+        x = sa[i] if i < len(sa) else None
+        y = sb[i] if i < len(sb) else None
+        diff = abs(x[1] - y[1]) if x and y else None
+        if diff is not None:
+            worst = max(worst, diff)
+        print(f"  #{i + 1:<3} A {fmt_t(x[0]) + f'  X{x[1]:.1f}' if x else '       -':>18}   "
+              f"B {fmt_t(y[0]) + f'  X{y[1]:.1f}' if y else '       -':>18}   "
+              + ("missing" if diff is None else f"diff {diff:.1f}"))
+    if not sa or not sb:
+        print("MISMATCH: no zoom positions from " + ("either board" if not sa and not sb else
+              "board A" if not sa else "board B") + "; nothing was compared")
+        return 1
+    mismatch = len(sa) != len(sb) or worst > a.tolerance + 1e-9
+    print(f"{'MISMATCH' if mismatch else 'match'}: max difference {worst:.1f} (tolerance {a.tolerance})")
+    return 1 if mismatch else 0
 
 
 def cmd_diff(a: argparse.Namespace) -> int:
@@ -258,6 +317,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="FTDI latency timer in ms, set via sysfs (0 = leave as is; default 1)")
     b.add_argument("--quiet", action="store_true", help="no live output")
     b.add_argument("--all", action="store_true", help="print every frame, not only changes")
+    b.add_argument("--tee", metavar="URL",
+                   help="also send every whole camera frame to this port or URL, e.g. "
+                        "socket://host:9000 (xm-uart -l on another camera); its replies are logged as t2c")
     b.add_argument("--mute-cam", action="store_true",
                    help="log camera bytes but do not forward them to the PTZ board")
     b.add_argument("--no-stdin", action="store_true",
@@ -286,8 +348,14 @@ def build_parser() -> argparse.ArgumentParser:
     d = sub.add_parser("decode", help="print an annotated timeline of a capture")
     d.add_argument("file", type=Path)
     d.add_argument("--all", action="store_true", help="print every frame, not only changes")
-    d.add_argument("--dir", choices=("both", C2P, P2C, H2P, C2M), default="both")
+    d.add_argument("--dir", choices=("both", C2P, P2C, H2P, C2M, C2T, T2C), default="both")
     d.set_defaults(func=cmd_decode)
+
+    bo = sub.add_parser("boards", help="compare the zoom positions two lens boards settled at")
+    bo.add_argument("a", type=Path, help="capture (its p2c is board A; its t2c is B unless B is given)")
+    bo.add_argument("b", type=Path, nargs="?", help="second capture whose p2c is board B")
+    bo.add_argument("--tolerance", type=float, default=0.1, help="allowed zoom difference (default 0.1)")
+    bo.set_defaults(func=cmd_boards)
 
     f = sub.add_parser("diff", help="compare two captures; exit 1 on divergence")
     f.add_argument("a", type=Path)

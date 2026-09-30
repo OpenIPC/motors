@@ -25,6 +25,21 @@ A move continues until stop. The tool also sends stop whenever it exits: on `q`,
 
 Zoom reports from the board are printed as `Zoom X1.4`.
 
+### Network relay (`-l`)
+
+```sh
+xm-uart-motors-openipc -d /dev/ttyAMA0 -l 9000 -a 192.0.2.10 </dev/null &   # -a: the only client allowed
+```
+
+This relays a TCP client's frames to the lens board and sends the board's replies back:
+- frames are written **whole**, and never interleaved with a partial frame, because the board's parser has no timeout;
+- a partial frame older than 300 ms is dropped, and so are stray bytes;
+- a disconnect sends stop;
+- only one client is served at a time;
+- stdin EOF does not quit.
+
+It's used to feed a second camera's lens board the exact traffic a reference camera sends to its own board; see [`uart-bridge/TWIN.md`](../uart-bridge/TWIN.md). [`S99xm-uart-relay`](S99xm-uart-relay) starts it at boot on OpenIPC.
+
 ### Build
 
 ```sh

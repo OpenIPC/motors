@@ -192,6 +192,18 @@ The lens column comes from RTSP frames sampled across each run (a 4×4 contact s
 
 A replacement for the camera firmware doesn't need to home or restore the lens at boot, because the board does both. It should expect a single zoom report about a minute after power-up, and must not send motion commands in the meantime.
 
+## Second board: network replay (two 85H50AI cameras)
+
+A second 85H50AI camera, running OpenIPC, was fed the reference camera's exact traffic, `A5` stream included, through `bridge --tee` → `xm-uart -l`. It was also fed a recorded stock session through `inject --ptz socket://…`. The procedure is in `uart-bridge/TWIN.md`. Findings:
+
+- **Zoom is identical board to board.** Live, over the stock firmware's commands, both boards settled at X2.2, X3.4/3.5, X2.8 and X1.0, within 0.1 (`twin-live-tee`). Replaying the stored `e1-stock` session from the same starting zoom gave X1.7, X1.2, X1.7 on both, with no difference (`replay-e1-to-openipc`). From a different starting zoom it misses by 0.3: zoom ratio isn't linear in steps.
+- **Focus at X1.0 is identical with a healthy lens.** After both boards re-homed and synced, each tracked focus was within ~0.1 s of drive of its camera's sharpest point: +0.02 s and +0.07 s.
+- **A degraded lens shows up as unreachable focus.** The OpenIPC unit's original lens, several years in service, was blurred at every zoom. It was sharpest at its far focus stop and still improving there. Its travel matched the healthy lens (≈20 s of drive stop to stop), but its in-focus point lay beyond that travel. Replacing the lens fixed it. So the fault was in the lens, not the board or the protocol.
+- **Board limits count steps, lenses don't report back.** A replacement lens that did not move physically still produced normal zoom reports and a "silent" end stop. Only the video showed it: a narrower field of view at "X1.0". Check the picture, not only the reports.
+- **The board refocuses after a zoom by itself; the `A5` stream plays no part (verified).** The stock firmware's zoom-in (1.5 s) was recorded with the camera connected, then replayed to the same vendor board from the same start (the wide stop) twice: once with the recorded `A5` frames and once with **only the two `C5` frames**, zoom and stop. The sharpness after the stop climbed the same way in all three runs, about 870 → 980 → 1000 over ~4 s, reaching 998, 1003 and 1006 (`captures/a5-burst-*.jsonl.gz`). 1445 idle `A5` frames teed to the second board also changed nothing.
+- **Focus diverges between boards only through their starting focus state.** In the live twin session the zoom matched, but each lens was sharp at some zooms and not others. The vendor lens started that run out of focus at X1.0 (sharpness 10), the OpenIPC lens in focus. Tracking carries a board's focus offset through every zoom move, so start both from a re-home and `sync` (`uart-bridge/TWIN.md`).
+- **OpenIPC's majestic must release the lens UART** (`isp.autofocus.enabled: false`). In manual mode it still keeps the tty open and takes half of the board's replies.
+
 ## Where the old xm-uart went wrong
 
 | Old behaviour | Effect | Fixed to |
@@ -220,4 +232,8 @@ These are in [`captures/`](captures/), in the `uart-bridge` JSONL format. Replay
 | `e13-powercycle.jsonl.gz` | camera power-cycled over PoE (lens at X1.2); includes the U-Boot console text and the post-boot `A5` churn |
 | `e14-powercycle.jsonl.gz` | power cycle from X3.0 defocused; zoom returns to X3.0 at 70.5 s |
 | `e15-powercycle-muted.jsonl.gz` | power cycle from X2.0 with `--mute-cam`, so the board hears nothing from the camera; it still homes and returns to X2.0 at 119.2 s. The camera's output is logged as `c2m`, for "muted, never sent to the board". |
+| `twin-live-tee.jsonl.gz` | live stock DVRIP session on the reference camera, teed to the OpenIPC board: `p2c` is the reference board, `t2c` the second board; checkpoints carry both cameras' sharpness |
+| `replay-e1-to-openipc.jsonl.gz` | `e1-stock` replayed to the OpenIPC board through `xm-uart -l`, starting from the same zoom (X1.2); `boards e1-stock.jsonl replay-e1-to-openipc.jsonl.gz` matches |
+| `a5-burst-record.jsonl.gz` | stock zoom-in (DVRIP ZoomTile 1.5 s) from the wide stop, camera connected: the `C5` commands plus the live `A5` stream |
+| `a5-burst-with-a5.jsonl.gz`, `a5-burst-c5-only.jsonl.gz` | the recording replayed to the same board from the same start, with and without its `A5` frames; the post-zoom refocus is identical |
 | `focus-direction-sweeps.json` | per-step sharpness of the near, far and star targets for the three focus sweeps |
