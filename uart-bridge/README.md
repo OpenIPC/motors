@@ -29,6 +29,10 @@ uv run uart-bridge inject --frame a52e9eea2662efae --rate 20 --duration 2
 ```
 
 - `bridge --cam pty` creates a pseudo terminal in place of the camera port and prints its path once forwarding has started. A local program under test (for example `xm-uart-motors-host -d /dev/pts/N`) then plays the camera against the real PTZ board, and every byte is logged. `scripts/xm_uart_audit.py tool` does this with a scripted key sequence.
+- Ports can also be pyserial URLs such as `socket://host:9000`, for example `inject --ptz socket://cam:9000 --replay stock.jsonl` to replay a recording to another camera's lens board through `xm-uart -l`.
+- `bridge --tee URL` also sends every **whole** camera frame to URL, logged as `c2t`, and logs what comes back as `t2c`. It never forwards those replies to the camera. The boot console and other junk are not teed.
+- `uart-bridge boards A [B]` compares where two lens boards settled: A's `p2c` against A's `t2c`, or against B's `p2c`. It exits 1 on a mismatch beyond `--tolerance`.
+- [TWIN.md](TWIN.md) is the full procedure for comparing two cameras' lens boards this way.
 - `bridge --mute-cam` logs the camera's bytes but forwards none of them, so the PTZ board hears nothing from the camera. That separates what the board does on its own from what the camera makes it do; it showed that the lens board re-homes by itself at power-up (see `xm-uart/PROTOCOL.md`, *Power-up behaviour*).
 - The bridge never leaves a partial frame on the PTZ wire. The XM board starts an 8-byte frame at any `A5`/`C5` byte and has no inter-byte timeout (see `xm-uart/PROTOCOL.md`), so a stray byte silently eats the next command. Forwarding of camera bytes therefore starts only after a quiet gap on the camera line; bytes before it are logged as a mark, not forwarded. On exit, the bridge finishes forwarding the frame in flight.
 - While `bridge` runs, each line on stdin is stored in the log as a timestamped mark, for example `pan left pressed`. A line of the form `!<hex>` is sent to the PTZ board as a probe and logged as `h2p`. A probe waits for the end of any camera frame in flight, so it never splices into one. If the camera stops mid-frame for 1 s, the probe goes out anyway and the stall is logged as a mark. For example, xm-uart's zoom-in then stop:
@@ -76,6 +80,9 @@ The XM camera ↔ lens board protocol is specified in [`xm-uart/PROTOCOL.md`](..
 - `tool <binary>`: a program under test through the pty;
 - `focus`: RTSP sharpness;
 - `focusdir`: which focus bit moves focus nearer, by sweeping focus past near and far targets whose depth order is known from occlusion;
-- `restore` / `refocus`: put the lens back afterwards.
+- `restore` / `refocus`: put the lens back afterwards;
+- `sync`: drive two lenses (the second one through `--openipc socket://…`) into the wide end stop;
+- `twin`: a live tee of a stock DVRIP session to a second board, with sharpness on both;
+- `focusoffset`: where the sharpest focus is relative to a board's tracked focus.
 
 Run `uv run scripts/xm_uart_audit.py -h` for the options.

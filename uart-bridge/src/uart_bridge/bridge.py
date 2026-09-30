@@ -17,8 +17,8 @@ from typing import Callable
 
 import serial
 
-from .framing import CAM_RULES, SYNC_BYTES, Framer
-from .log import C2M, C2P, H2P, P2C, LogWriter
+from .framing import CAM_RULES, SYNC_BYTES, Frame, Framer
+from .log import C2M, C2P, C2T, H2P, P2C, T2C, LogWriter
 
 # A probe is held back while a camera frame is half-forwarded. The rest of a
 # frame can lag by the USB latency timer (up to 16 ms) plus scheduling, so
@@ -103,7 +103,15 @@ def trailing_commands(data: bytes) -> int | None:
     return None
 
 
+def is_url(path: str) -> bool:
+    return "://" in path
+
+
 def open_port(path: str, baud: int) -> serial.Serial:
+    """A serial device, or a pyserial URL such as socket://host:port (e.g. a
+    remote xm-uart -l relay in front of another camera's lens board)."""
+    if is_url(path):
+        return serial.serial_for_url(path, baudrate=baud, timeout=0, write_timeout=1)
     return serial.Serial(
         path, baud,
         bytesize=serial.EIGHTBITS, parity=serial.PARITY_NONE,
@@ -160,8 +168,8 @@ def set_latency(path: str, ms: int) -> str:
 
 @dataclass
 class Stats:
-    bytes: dict = field(default_factory=lambda: {C2P: 0, P2C: 0, H2P: 0, C2M: 0})
-    reads: dict = field(default_factory=lambda: {C2P: 0, P2C: 0, H2P: 0, C2M: 0})
+    bytes: dict = field(default_factory=lambda: dict.fromkeys((C2P, P2C, H2P, C2M, C2T, T2C), 0))
+    reads: dict = field(default_factory=lambda: dict.fromkeys((C2P, P2C, H2P, C2M, C2T, T2C), 0))
 
 
 class Stopper:
@@ -189,11 +197,17 @@ def run(
     on_mark: Callable[[int, str], None] | None = None,
     cam_last_ns: int | None = None,
     mute_cam: bool = False,
+    tee: serial.Serial | None = None,
 ) -> Stats:
     """Forward cam<->ptz until stopped.
 
     `cam_last_ns` is when the camera line last carried a byte before the
     bridge started (from drain_stale); None means it was quiet.
+
+    With `tee`, every whole frame the camera sends to its board is also
+    written to the tee (logged c2t), and what the tee answers is logged as
+    t2c but not passed to the camera. The tee gets frames only, never a
+    partial one or junk such as the boot console.
 
     With `mute_cam`, camera bytes are logged but not forwarded: the PTZ board
     hears nothing from the camera (probes still go through). Used to tell
@@ -209,6 +223,8 @@ def run(
     sel.register(ptz.fileno(), selectors.EVENT_READ, (ptz, cam, P2C))
     if control is not None:
         sel.register(control, selectors.EVENT_READ, None)
+    if tee is not None:
+        sel.register(tee.fileno(), selectors.EVENT_READ, (tee, None, T2C))
     pending = b""
     probes: list[bytes] = []
     cam_framer = Framer(CAM_RULES)
@@ -237,6 +253,18 @@ def run(
             if on_data:
                 on_data(t, H2P, probe)
         probes.clear()
+    def to_tee(t: int, items) -> None:
+        if tee is None:
+            return
+        for item in items:
+            if isinstance(item, Frame):
+                tee.write(item.data)
+                writer.data(t, C2T, item.data)
+                stats.bytes[C2T] += len(item.data)
+                stats.reads[C2T] += 1
+                if on_data:
+                    on_data(t, C2T, item.data)
+
     def finish_frame() -> None:
         """Forward the rest of a camera frame already partly on the PTZ wire."""
         nonlocal last_c2p
@@ -251,7 +279,7 @@ def run(
             writer.data(t, C2P, data)
             stats.bytes[C2P] += len(data)
             stats.reads[C2P] += 1
-            cam_framer.feed(t, data)
+            to_tee(t, cam_framer.feed(t, data))
             last_c2p = t
         if cam_framer.pending():
             writer.mark(time.monotonic_ns() - t0,
@@ -287,6 +315,13 @@ def run(
                 src, dst, d = key.data
                 data = src.read(4096)
                 if not data:
+                    continue
+                if d == T2C:  # the second board's replies: logged, not passed on
+                    writer.data(t, T2C, data)
+                    stats.bytes[T2C] += len(data)
+                    stats.reads[T2C] += 1
+                    if on_data:
+                        on_data(t, T2C, data)
                     continue
                 if d == C2P and mute_cam:
                     # Never reached the board: log it as c2m, so replay and
@@ -325,7 +360,7 @@ def run(
                 if on_data:
                     on_data(t, d, data)
                 if d == C2P:
-                    cam_framer.feed(t, data)
+                    to_tee(t, cam_framer.feed(t, data))
                     last_c2p = t
                     send_probes(t)
             send_probes(time.monotonic_ns() - t0)

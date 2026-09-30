@@ -1,0 +1,21 @@
+#!/bin/sh
+# xm-uart network relay for comparing lens boards (see uart-bridge/TWIN.md).
+# Frames from one TCP client go to the lens board on $TTY whole; the board's
+# replies go back. Nothing else may drive the lens meanwhile: on OpenIPC set
+# `cli -s .isp.autofocus.enabled false` so majestic releases the UART.
+# Install: /etc/init.d/S99xm-uart-relay (chmod +x), binary in /usr/bin/xm-uart.
+PORT=9000
+TTY=/dev/ttyAMA0
+case "$1" in
+  start)
+    printf "Starting xm-uart relay on port %s: " "$PORT"
+    start-stop-daemon -S -b -m -p /var/run/xm-uart-relay.pid \
+      -x /bin/sh -- -c "exec /usr/bin/xm-uart -d $TTY -l $PORT </dev/null >/tmp/xm-uart.log 2>&1"
+    echo OK ;;
+  stop)
+    start-stop-daemon -K -p /var/run/xm-uart-relay.pid ;;
+  restart)
+    "$0" stop; sleep 1; "$0" start ;;
+  *)
+    echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac

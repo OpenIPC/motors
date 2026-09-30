@@ -671,3 +671,85 @@ def test_summaries_show_muted_junk():
     s = analysis.summarize(analysis.events([Record(0, C2M, b"\x00\x11" + IDLE[0])]))
     text = counts(s)
     assert "c2m=1" in text and "junk bytes" in text and text.endswith("c2m=2")
+
+
+def test_open_port_accepts_socket_urls():
+    srv = socket_server()
+    port = bridge.open_port(f"socket://127.0.0.1:{srv.getsockname()[1]}", 115200)
+    conn, _ = srv.accept()
+    port.write(ZOOM_IN)
+    assert conn.recv(16) == ZOOM_IN
+    conn.sendall(REPLY)
+    time.sleep(0.05)
+    assert port.read(64) == REPLY
+    port.close()
+    conn.close()
+    srv.close()
+
+
+def socket_server():
+    import socket
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    return srv
+
+
+def test_bridge_tee_gets_whole_frames_only_and_logs_both_ways():
+    from uart_bridge.log import C2T, T2C
+    srv = socket_server()
+    cam_m, cam_path, cam_s = pty_port()
+    ptz_m, ptz_path, ptz_s = pty_port()
+    cam = bridge.open_port(cam_path, 115200)
+    ptz = bridge.open_port(ptz_path, 115200)
+    tee = bridge.open_port(f"socket://127.0.0.1:{srv.getsockname()[1]}", 115200)
+    remote, _ = srv.accept()
+    remote.settimeout(0.5)
+    log = io.StringIO()
+    stopper, th = run_bridge_thread(cam, ptz, log, tee=tee)
+    try:
+        time.sleep(0.02)
+        os.write(cam_m, b"U-Boot\r\n")                 # console junk: board gets it, tee does not
+        time.sleep(0.03)
+        os.write(cam_m, ZOOM_IN[:3])
+        time.sleep(0.01)
+        os.write(cam_m, ZOOM_IN[3:] + IDLE[0])
+        got = b""
+        while len(got) < 16:
+            got += remote.recv(64)
+        assert got == ZOOM_IN + IDLE[0]                # whole frames, A5 included
+        remote.sendall(REPLY)                          # the second board answers
+        time.sleep(0.1)
+        assert read_exact(cam_m, 64, timeout=0.2) == b""   # never passed to the vendor camera
+    finally:
+        stopper.stop = True
+        th.join(2)
+    text = log.getvalue()
+    assert f'"d":"{C2T}","x":"{ZOOM_IN.hex()}"' in text and f'"d":"{T2C}"' in text
+    for fd in (cam_m, cam_s, ptz_m, ptz_s):
+        os.close(fd)
+    tee.close()
+    remote.close()
+    srv.close()
+
+
+def test_boards_compares_settled_zoom_positions(tmp_path, capsys):
+    from uart_bridge.cli import main
+    from uart_bridge.log import T2C
+
+    def report(z):
+        return bytes.fromhex("ef01000904032f2e") + f"X{z:.1f} ".encode()
+
+    p = tmp_path / "t.jsonl"
+    with open(p, "w") as fp:
+        w = LogWriter(fp, {"mode": "bridge"})
+        for i, z in enumerate((1.3, 1.5, 1.7)):        # vendor board zooms to 1.7
+            w.data(i * 200_000_000, P2C, report(z))
+        for i, z in enumerate((1.3, 1.5, 1.8)):        # second board ends at 1.8
+            w.data(i * 200_000_000 + 10_000_000, T2C, report(z))
+        w.data(3_000_000_000, P2C, report(1.2))       # both back to 1.2 after a pause
+        w.data(3_010_000_000, T2C, report(1.2))
+    assert main(["boards", str(p)]) == 0              # 0.1 is within tolerance
+    assert "match" in capsys.readouterr().out
+    assert main(["boards", str(p), "--tolerance", "0.05"]) == 1
+    assert "MISMATCH" in capsys.readouterr().out

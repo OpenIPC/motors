@@ -137,6 +137,9 @@ On top of that it implements **contrast-based autofocus** in a background pthrea
 Python (`uv run …`), not cross-compiled and not covered by the GCC gate; its
 tests are `cd uart-bridge && uv run pytest` (pty pairs, no hardware). It runs on
 a lab host wired camera-UART ↔ host ↔ PTZ-board-UART and records JSONL captures.
+Ports may be pyserial URLs (`socket://…`); `bridge --tee` and `xm-uart -l` together
+replay one camera's lens traffic onto a second camera's board, and `TWIN.md` is the
+procedure for comparing two boards that way.
 `codec.py` holds what is known about the three frame types on that link: the
 camera's scrambled `A5 <counter^0x25> …` stream (20 frames/s, the same
 family as `xm-uart`'s `init[]`, never answered by the board), the XM Pelco-D

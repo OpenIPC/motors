@@ -4,6 +4,7 @@
  * PROTOCOL.md next to this file; every value below is taken from captures of
  * the stock firmware and of the board's behaviour, not from generic Pelco-D.
  */
+#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
@@ -15,6 +16,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
+#include <sys/time.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -95,6 +100,97 @@ static void send_move(int pan, int tilt, int zoom) {
 
 static void send_stop(void) { send_frame(0, 0, 0, 0); }
 
+/* Network relay (-l): frames from a TCP client go to the lens board, the
+ * board's replies go back to the client. Used to replay a vendor camera's
+ * traffic onto another camera's lens (see PROTOCOL.md). */
+#define PARTIAL_TIMEOUT_MS 300
+
+static int client_fd = -1;
+static uint8_t net_frame[8];
+static size_t net_len;
+static long long net_started_ms;
+static unsigned long net_frames, net_dropped;
+
+static long long now_ms(void) {
+  struct timeval tv;
+  gettimeofday(&tv, NULL);
+  return (long long)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+}
+
+/* Reassemble with the board's own rule: an A5 or C5 byte starts an 8-byte
+ * frame. Only whole frames are written, since the board's parser has no
+ * inter-byte timeout and a partial one would swallow the next command. */
+static void net_feed(const uint8_t *data, size_t len) {
+  for (size_t i = 0; i < len; i++) {
+    uint8_t b = data[i];
+    if (net_len == 0) {
+      if (b != 0xa5 && b != SYNC) {
+        net_dropped++;
+        continue;
+      }
+      net_started_ms = now_ms();
+    }
+    net_frame[net_len++] = b;
+    if (net_len == sizeof(net_frame)) {
+      if (write_all(uart, net_frame, sizeof(net_frame)) < 0)
+        fprintf(stderr, "write: %s\n", strerror(errno));
+      net_frames++;
+      net_len = 0;
+    }
+  }
+}
+
+static void net_expire(void) {
+  if (net_len && now_ms() - net_started_ms > PARTIAL_TIMEOUT_MS) {
+    printf("Discarded a partial frame of %zu bytes from the network\n", net_len);
+    net_dropped += net_len;
+    net_len = 0;
+  }
+}
+
+static void net_close_client(const char *why) {
+  close(client_fd);
+  client_fd = -1;
+  net_len = 0;
+  printf("Client %s after %lu frames (%lu bytes dropped); stop\n", why, net_frames,
+         net_dropped);
+  send_stop(); /* never leave a motor running for a sender that vanished */
+}
+
+static int net_listen(int port) {
+  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0)
+    return -1;
+  int one = 1;
+  setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+  struct sockaddr_in a = {.sin_family = AF_INET,
+                          .sin_port = htons((uint16_t)port),
+                          .sin_addr.s_addr = htonl(INADDR_ANY)};
+  if (bind(fd, (struct sockaddr *)&a, sizeof(a)) < 0 || listen(fd, 1) < 0) {
+    close(fd);
+    return -1;
+  }
+  return fd;
+}
+
+static void net_accept(int listen_fd) {
+  struct sockaddr_in a;
+  socklen_t alen = sizeof(a);
+  int fd = accept(listen_fd, (struct sockaddr *)&a, &alen);
+  if (fd < 0)
+    return;
+  if (client_fd >= 0) {
+    printf("Refused %s: a client is already connected\n", inet_ntoa(a.sin_addr));
+    close(fd);
+    return;
+  }
+  int one = 1;
+  setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+  client_fd = fd;
+  net_frames = net_dropped = 0;
+  printf("Client %s connected\n", inet_ntoa(a.sin_addr));
+}
+
 static void restore_stdin(void) {
   if (stdin_saved)
     tcsetattr(STDIN_FILENO, TCSANOW, &saved_stdin);
@@ -173,8 +269,10 @@ static void parse_incoming(const uint8_t *data, size_t size) {
 }
 
 static void usage(const char *argv0) {
-  printf("Usage: %s [-d tty]\n", argv0);
-  printf("\t-d tty device, default /dev/ttyAMA0\n\n");
+  printf("Usage: %s [-d tty] [-l port]\n", argv0);
+  printf("\t-d tty device, default /dev/ttyAMA0\n");
+  printf("\t-l listen on this TCP port: frames from the client go to the lens\n"
+         "\t   board whole, its replies go back (stdin EOF does not quit)\n\n");
   printf("Keys: + - zoom in/out, z x focus near/far, h l pan left/right,\n"
          "      j k tilt down/up, Space or Enter stop, q quit\n");
 }
@@ -202,12 +300,19 @@ static int open_uart(const char *device) {
 
 int main(int argc, char *argv[]) {
   const char *device = "/dev/ttyAMA0";
-  int c;
+  int port = 0, c;
 
-  while ((c = getopt(argc, argv, "d:h")) != -1) {
+  while ((c = getopt(argc, argv, "d:l:h")) != -1) {
     switch (c) {
     case 'd':
       device = optarg;
+      break;
+    case 'l':
+      port = atoi(optarg);
+      if (port <= 0 || port > 65535) {
+        fprintf(stderr, "bad port: %s\n", optarg);
+        return 1;
+      }
       break;
     case 'h':
       usage(argv[0]);
@@ -232,23 +337,37 @@ int main(int argc, char *argv[]) {
     atexit(restore_stdin);
   }
 
+  int listen_fd = -1;
+  if (port) {
+    listen_fd = net_listen(port);
+    if (listen_fd < 0) {
+      fprintf(stderr, "listen on port %d: %s\n", port, strerror(errno));
+      return 1;
+    }
+  }
+  bool stdin_open = true;
+
   struct sigaction sa = {.sa_handler = on_signal};
   sigaction(SIGINT, &sa, NULL);
   sigaction(SIGTERM, &sa, NULL);
   sigaction(SIGHUP, &sa, NULL);
+  signal(SIGPIPE, SIG_IGN); /* a vanished client must not kill us mid-move */
 
   printf("Xiongmai UART Motors, get in a car and fasten your safety belt\n");
   usage(argv[0]);
 
   while (!quit) {
-    struct pollfd pfds[2] = {
-        {.fd = STDIN_FILENO, .events = POLLIN},
+    struct pollfd pfds[4] = {
+        {.fd = stdin_open ? STDIN_FILENO : -1, .events = POLLIN},
         {.fd = uart, .events = POLLIN},
+        {.fd = listen_fd, .events = POLLIN},
+        {.fd = client_fd, .events = POLLIN},
     };
 
     /* A signal landing between the quit check and poll() would otherwise
-     * wait for the next key; the timeout bounds that (no ppoll in uClibc). */
-    if (poll(pfds, 2, 200) < 0) {
+     * wait for the next key; the timeout bounds that (no ppoll in uClibc)
+     * and also ages out a partial network frame. */
+    if (poll(pfds, 4, 100) < 0) {
       if (errno == EINTR)
         continue;
       perror("poll");
@@ -261,6 +380,10 @@ int main(int argc, char *argv[]) {
       if (n <= 0) {
         if (n < 0 && errno == EINTR)
           continue;
+        if (listen_fd >= 0) { /* a relay runs detached from any terminal */
+          stdin_open = false;
+          continue;
+        }
         printf("stdin closed\n");
         break;
       }
@@ -320,9 +443,11 @@ int main(int argc, char *argv[]) {
         printf("UART closed, make sure system getty is disabled on UART\n");
         break;
       }
-      if (n > 0)
+      if (n > 0) {
+        if (client_fd >= 0 && send(client_fd, rbuf, (size_t)n, 0) < 0)
+          net_close_client("lost");
         parse_incoming(rbuf, (size_t)n);
-      else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+      } else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
         printf("UART read: %s\n", strerror(errno));
         break;
       }
@@ -336,12 +461,28 @@ int main(int argc, char *argv[]) {
     }
     if (pfds[0].revents & (POLLERR | POLLNVAL))
       break;
+
+    if (pfds[2].revents & POLLIN)
+      net_accept(listen_fd);
+    if (client_fd >= 0 && pfds[3].revents & (POLLIN | POLLHUP | POLLERR)) {
+      uint8_t nbuf[512];
+      ssize_t n = recv(client_fd, nbuf, sizeof(nbuf), 0);
+      if (n > 0)
+        net_feed(nbuf, (size_t)n);
+      else if (n == 0 || (errno != EAGAIN && errno != EINTR))
+        net_close_client(n == 0 ? "disconnected" : "failed");
+    }
+    net_expire();
     fflush(stdout);
   }
 
   /* Never leave a motor running: whatever ended the loop, stop first. */
   puts("Stop");
   send_stop();
+  if (client_fd >= 0)
+    close(client_fd);
+  if (listen_fd >= 0)
+    close(listen_fd);
   tcdrain(uart);
   close(uart);
   return 0;
