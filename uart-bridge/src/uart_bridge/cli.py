@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import gzip
 import math
 import os
 import sys
@@ -11,11 +12,11 @@ from pathlib import Path
 
 from . import analysis, codec
 from .framing import Frame
-from .log import C2P, H2P, MARK, P2C, LogWriter, read_log
+from .log import C2M, C2P, H2P, MARK, P2C, LogWriter, read_log
 
 DEFAULT_CAM = "/dev/ttyUSB0"
 DEFAULT_PTZ = "/dev/ttyUSB1"
-ARROW = {C2P: "cam->ptz", P2C: "ptz->cam", H2P: "host->ptz", analysis.TO_PTZ: "->ptz"}
+ARROW = {C2P: "cam->ptz", P2C: "ptz->cam", H2P: "host->ptz", C2M: "cam-x-ptz", analysis.TO_PTZ: "->ptz"}
 
 
 def fmt_t(t: int) -> str:
@@ -83,6 +84,9 @@ def open_log(path: Path | None, mode: str):
     path = path or default_log(mode)
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
+        # A .gz name gets a real gzip file, since read_log() decides by the suffix.
+        if str(path).endswith(".gz"):
+            return path, gzip.open(path, "xt")
         return path, open(path, "x")
     except FileExistsError:
         raise SystemExit(f"{path} already exists; not overwriting a capture")
@@ -90,8 +94,8 @@ def open_log(path: Path | None, mode: str):
 
 def print_stats(stats, path: Path) -> None:
     print(f"\nlog: {path}", file=sys.stderr)
-    for d in (C2P, P2C, H2P):
-        if d == H2P and not stats.reads[d]:
+    for d in (C2P, P2C, H2P, C2M):
+        if d in (H2P, C2M) and not stats.reads[d]:
             continue
         print(f"  {ARROW[d]}: {stats.bytes[d]} bytes in {stats.reads[d]} reads", file=sys.stderr)
 
@@ -115,7 +119,7 @@ def cmd_bridge(a: argparse.Namespace) -> int:
         writer = LogWriter(fp, {
             "mode": "bridge", "cam": a.cam, "ptz": a.ptz,
             "baud": a.baud, "ptz_baud": a.ptz_baud or a.baud, "latency": latency,
-            "stale_dropped": stale, "note": a.note or "",
+            "stale_dropped": stale, "mute_cam": a.mute_cam, "note": a.note or "",
         })
         stopper = bridge.Stopper()
         stopper.install()
@@ -133,7 +137,7 @@ def cmd_bridge(a: argparse.Namespace) -> int:
                            on_data=printer.data if printer else None,
                            control=control, duration=a.duration,
                            on_mark=printer.mark if printer else None,
-                           cam_last_ns=cam_drain.last_ns)
+                           cam_last_ns=cam_drain.last_ns, mute_cam=a.mute_cam)
         if printer:
             printer.flush()
     cam.close()
@@ -177,6 +181,15 @@ def cmd_inject(a: argparse.Namespace) -> int:
     return 0
 
 
+def counts(s: analysis.Summary) -> str:
+    """Frames and junk bytes per direction: c2p and p2c always, h2p and the
+    muted c2m whenever they carry anything, so noise in them is not hidden."""
+    dirs = [d for d in (C2P, P2C, H2P, C2M)
+            if d in (C2P, P2C) or s.frames[d] or s.junk_bytes[d]]
+    return ("frames " + " ".join(f"{d}={s.frames[d]}" for d in dirs)
+            + "  junk bytes " + " ".join(f"{d}={s.junk_bytes[d]}" for d in dirs))
+
+
 def cmd_decode(a: argparse.Namespace) -> int:
     header, records = read_log(a.file)
     print(f"# {header.get('mode', '?')} {header.get('wall', '')} git={header.get('git', '')} "
@@ -190,8 +203,7 @@ def cmd_decode(a: argparse.Namespace) -> int:
     printer.flush()
     s = analysis.summarize(analysis.events(records))
     lo, mean, hi = s.c2p_period_ms
-    print(f"# {s.duration_s:.1f}s  frames c2p={s.frames[C2P]} p2c={s.frames[P2C]} h2p={s.frames[H2P]}  "
-          f"junk bytes c2p={s.junk_bytes[C2P]} p2c={s.junk_bytes[P2C]} h2p={s.junk_bytes[H2P]}  "
+    print(f"# {s.duration_s:.1f}s  {counts(s)}  "
           f"c2p rate={s.c2p_rate:.2f}/s period min/mean/max={lo:.1f}/{mean:.1f}/{hi:.1f} ms")
     return 0
 
@@ -202,8 +214,7 @@ def cmd_diff(a: argparse.Namespace) -> int:
     ea, eb = analysis.events(ra), analysis.events(rb)
     for name, evs in (("A", ea), ("B", eb)):
         s = analysis.summarize(evs)
-        print(f"{name}: {s.duration_s:.1f}s frames c2p={s.frames[C2P]} p2c={s.frames[P2C]} "
-              f"junk c2p={s.junk_bytes[C2P]} p2c={s.junk_bytes[P2C]} rate={s.c2p_rate:.2f}/s")
+        print(f"{name}: {s.duration_s:.1f}s {counts(s)} rate={s.c2p_rate:.2f}/s")
     divs = analysis.diff(ea, eb, tolerance=a.tolerance, time_tolerance_ms=a.time_tolerance,
                          strict_a5=a.strict_a5, ignore_edges=a.ignore_edges)
     for dv in divs:
@@ -247,6 +258,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="FTDI latency timer in ms, set via sysfs (0 = leave as is; default 1)")
     b.add_argument("--quiet", action="store_true", help="no live output")
     b.add_argument("--all", action="store_true", help="print every frame, not only changes")
+    b.add_argument("--mute-cam", action="store_true",
+                   help="log camera bytes but do not forward them to the PTZ board")
     b.add_argument("--no-stdin", action="store_true",
                    help="ignore stdin (no marks, no probes)")
     b.set_defaults(func=cmd_bridge)
@@ -273,7 +286,7 @@ def build_parser() -> argparse.ArgumentParser:
     d = sub.add_parser("decode", help="print an annotated timeline of a capture")
     d.add_argument("file", type=Path)
     d.add_argument("--all", action="store_true", help="print every frame, not only changes")
-    d.add_argument("--dir", choices=("both", C2P, P2C, H2P), default="both")
+    d.add_argument("--dir", choices=("both", C2P, P2C, H2P, C2M), default="both")
     d.set_defaults(func=cmd_decode)
 
     f = sub.add_parser("diff", help="compare two captures; exit 1 on divergence")
@@ -294,7 +307,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     a = build_parser().parse_args(argv)
     try:
-        return a.func(a)
+        rc = a.func(a)
+        sys.stdout.flush()  # a closed pipe can also surface here, at the final flush
+        return rc
     except BrokenPipeError:
         # Reader went away (`| head`); keep the interpreter from complaining
         # again while it flushes stdout at exit.
