@@ -84,7 +84,7 @@ uv run scripts/xm_uart_audit.py focusoffset --camera REF
 uv run scripts/xm_uart_audit.py focusoffset --rtsp rtsp://… --ptz socket://CAM:9000
 ```
 
-This measures how far each board's tracked focus is from that camera's sharpest point. It uses a one-direction sweep after taking up backlash, then drives back. Equal offsets mean equal lenses.
+This measures how far each board's tracked focus is from that camera's sharpest point. It uses a one-direction sweep after taking up backlash, then drives back. Equal offsets mean equal lenses. The sweep assumes 0.15 s of backlash and the real one is 0.45–0.7 s, so read offsets as ±0.3 s; `scripts/xm_tracking.py offset` also records the sharpness where the board settled, which needs no assumption.
 
 "No peak inside the sweep" means the best focus lies outside the swept range: widen `--away` and `--steps`. If sharpness is still rising when the lens reaches a stop, the lens can't reach focus at all. Then run the same sweep on both lenses from their near stop and compare *where along the travel* each one is sharpest:
 - **Same travel, different sharp point:** the fault is optical or mechanical in that lens (the focus group has shifted, or the back-focus has changed).
@@ -92,7 +92,7 @@ This measures how far each board's tracked focus is from that camera's sharpest 
 
 ## Pitfalls (all hit in the lab)
 - **Two readers on the lens tty.** See step 1.
-- **Unequal starting focus.** An XM board refocuses by itself after every zoom, from its tracking; the reference camera's traffic adds nothing to that, so replaying the `A5` stream or not makes no difference. A focus offset present at the start is carried through every zoom move, so two lenses that start differently stay different.
+- **Unequal starting focus.** An XM board refocuses by itself after every zoom, from its tracking; the reference camera's traffic adds nothing to that, so replaying the `A5` stream or not makes no difference. Each zoom puts focus back on the board's own curve (a manual offset is mostly lost), but the curve itself can differ between lenses, so compare from the same starting state anyway. Allow ~10 s after a zoom stop before measuring: the board can make a last focus move that late.
 - **Stale lens state.** Compare only after both boards have re-homed. Earlier autofocus runs, or sweeps, leave focus offsets that tracking preserves through every zoom move.
 - **Relay in `/tmp`.** It's gone after the power cycle that re-homing needs. Install it into the overlay.
 - **Different scenes.** Absolute sharpness numbers aren't comparable between cameras. Compare trends and the positions of peaks, not values.

@@ -86,3 +86,9 @@ The XM camera ↔ lens board protocol is specified in [`xm-uart/PROTOCOL.md`](..
 - `focusoffset`: where the sharpest focus is relative to a board's tracked focus.
 
 Run `uv run scripts/xm_uart_audit.py -h` for the options.
+
+`scripts/xm_tracking.py` measures the board's own zoom tracking on one or more
+boards at once (`--board NAME PTZ RTSP`, repeatable): focus while and after a zoom,
+where it settles against the sharpest point, combined and interleaved zoom/focus
+frames, backlash, and whether the camera's `A5` stream feeds an autofocus loop. The
+results are in `xm-uart/PROTOCOL.md`, "Zoom tracking inside the board".
