@@ -201,8 +201,55 @@ A second 85H50AI camera, running OpenIPC, was fed the reference camera's exact t
 - **A degraded lens shows up as unreachable focus.** The OpenIPC unit's original lens, several years in service, was blurred at every zoom. It was sharpest at its far focus stop and still improving there. Its travel matched the healthy lens (≈20 s of drive stop to stop), but its in-focus point lay beyond that travel. Replacing the lens fixed it. So the fault was in the lens, not the board or the protocol.
 - **Board limits count steps, lenses don't report back.** A replacement lens that did not move physically still produced normal zoom reports and a "silent" end stop. Only the video showed it: a narrower field of view at "X1.0". Check the picture, not only the reports.
 - **The board refocuses after a zoom by itself; the `A5` stream plays no part (verified).** The stock firmware's zoom-in (1.5 s) was recorded with the camera connected, then replayed to the same vendor board from the same start (the wide stop) twice: once with the recorded `A5` frames and once with **only the two `C5` frames**, zoom and stop. The sharpness after the stop climbed the same way in all three runs, about 870 → 980 → 1000 over ~4 s, reaching 998, 1003 and 1006 (`captures/a5-burst-*.jsonl.gz`). 1445 idle `A5` frames teed to the second board also changed nothing.
-- **Focus diverges between boards only through their starting focus state.** In the live twin session the zoom matched, but each lens was sharp at some zooms and not others. The vendor lens started that run out of focus at X1.0 (sharpness 10), the OpenIPC lens in focus. Tracking carries a board's focus offset through every zoom move, so start both from a re-home and `sync` (`uart-bridge/TWIN.md`).
+- **Focus diverges between boards only through their starting focus state.** In the live twin session the zoom matched, but each lens was sharp at some zooms and not others. The vendor lens started that run out of focus at X1.0 (sharpness 10), the OpenIPC lens in focus. So start both from a re-home and `sync` (`uart-bridge/TWIN.md`); how much of a starting focus offset survives a zoom is in *Zoom tracking inside the board*.
 - **OpenIPC's majestic must release the lens UART** (`isp.autofocus.enabled: false`). In manual mode it still keeps the tty open and takes half of the board's replies.
+
+## Zoom tracking inside the board
+
+Real cameras keep the picture roughly in focus while zooming, then fine-focus at the end. On this lens the first half is done **by the board**: it moves focus along its own curve while the zoom runs and for a few seconds after the stop. The camera only sends zoom. The board gets close to the crest but often not onto it, so the fine focus after the zoom is the camera's job.
+
+Measured on both 85H50AI boards with healthy lenses: the vendor board driven from the host, the OpenIPC board through `xm-uart -l`. Neither camera moved the lens itself meanwhile. Sharpness is Tenengrad on the centre of the RTSP frame. Focus positions are in seconds of focus drive. Reproduce with `uart-bridge/scripts/xm_tracking.py`; the per-experiment results are `captures/tracking-*.json`.
+
+**During the zoom (verified).** A full zoom-in, X1.0 → X5.0, takes 5.4 s on both boards, with 25 zoom reports. Sharpness stays moderate while the zoom runs, about half its final value at tele: the board tracks coarsely on the move. Once the zoom stops, it keeps climbing for 2–4 s (`zoom`).
+
+**After the stop (verified).** The board goes on moving focus by itself. Usually the last move is 1–2 s after the stop frame. But it can come much later: in 4 of 6 runs at X3.0 the OpenIPC board made one more move at +3.4, +6.4, +7.4 and +9.4 s, the vendor board twice at about +3.5 s (`settle`, 12 runs per board over two sessions). The late move goes to the **same final position every time** (sharpness ~820 on that board at X3.0), whatever focus the lens had just before, so it is the board putting focus back on its own curve. Stop frames sent during the settle don't prevent it, and neither does a near/far focus move made in the meantime: the late move still came, afterwards. So a host must wait out the whole settle, **~10 s**, before fine-focusing, or the board may undo the result. 700 ms is far too short. (Times after the stop are read off RTSP video and good to about ±0.5 s. The `offset`, `carry` and `stockzoom` results were taken 8 s after the stop, before the late move was known; `xm_tracking.py` now waits 12 s.)
+
+**Where it leaves focus (verified).** It is exact at some zooms and well off at others. Sharpness where the board settled, as a fraction of the best found by sweeping focus through the crest afterwards (`offset`):
+
+| Board | X2.0 | X3.0 | X4.0 | X5.0 |
+|---|---|---|---|---|
+| vendor | 23% | 100% | 44% | 32% |
+| OpenIPC | 43% | 100% | 76% | 90% |
+
+The sharpest point was within about 0.6 s of drive of the settled position in every case (sweep offsets −0.64 to +0.06 s). The crest is narrow: 90% of peak sharpness spans only 0.1–0.3 s of drive, falling to the flat floor about 1 s either side. So a short contrast search around wherever the board left focus, a second or so each way, finds the crest. A sweep across the whole focus range is never needed after a zoom.
+
+**Zoom and focus together: not possible (verified).** A frame with both a zoom bit and a focus bit set, `C5 01 00 A0 …` (tele + nearer) or `C5 01 01 20 …` (farther + tele) and the same for wide, resent every 50 ms for 1.5 s, does **nothing**: no zoom reports and no change in sharpness, on both boards (`combined`). The Pelco-D spec warns against the combination too (v5.2.2 §3, note 8: one lens module zoomed for a quarter of a second, then did nothing). Only one move runs at a time. A focus frame sent during a zoom stops the zoom, and a zoom frame sent during a focus move takes over. **The newest frame wins** (`interleave`).
+
+**Backlash (verified).** On a reversal, **0.45–0.7 s** of focus drive is lost in the gears before focus moves (0.45 s on the OpenIPC board, 0.70 s on the vendor one, swept in 50 ms pulses; an earlier run gave ≥ 0.5 s on both; `backlash`). Pulses shorter than that do not move the lens in proportion: swept in 30 ms pulses, the same measurement gave 0.18 s and 0.81 s. Drive focus continuously, or in pulses of 50 ms or more. The backlash is also far more than the 0.15 s that `xm_uart_audit.py focusoffset` assumes, so its offsets lean a few tenths toward "farther". Read them as ±0.3 s.
+
+**A manual focus offset is not kept through a zoom (verified).** Focus was nudged 1 s farther, then the lens zoomed to X3.0 and the offset there was compared with a zoom that had no nudge (`carry`). A nudge at the wide stop was not carried on either board: leaving the stop resets focus onto the board's curve. A nudge at X2.0, which moved focus a lot (sharpness 719 → 2990 on the vendor board), was not carried by the vendor board at all (offset −0.01 against 0.03). The OpenIPC board carried about 0.2 s of it (0.30 against 0.12). So after every zoom, focus is where the board's curve puts it, and any correction the camera made before the zoom has to be made again.
+
+**The camera's `A5` stream is not an autofocus loop (verified).** The stock firmware might send the board a focus statistic in the `A5` stream, for the board to close the loop on. Tested directly on the vendor camera: the same zoom (wide stop → X2.0, and → X4.0) was made twice each way, alternately. Once through the stock firmware over DVRIP, camera bridged to the board, `A5` stream live. Once injected by the host, camera cut off. Sharpness where the board settled, as a fraction of the best:
+
+| | stock zoom, live `A5` | host zoom, no `A5` |
+|---|---|---|
+| X2.0 | 45%, 36% | 36%, 34% |
+| X4.0 | 47%, 46% | 37%, 35% |
+
+With the stream the board settled a little closer, by 0–11 points (a second session gave the same picture: 47/38% against 36/25% at X2.0, 43/44% against 37/36% at X4.0). It was nowhere near the crest either way, and the offsets were the same size. Whatever the stream carries, the board does not autofocus on it. The small edge is not explained: it could come from the stream, or from the stock firmware's slightly different zoom timing (`captures/tracking-stockzoom.json`).
+
+**What a host should do.** Send zoom only, and let the board track. After the stop, wait ~10 s, then run a contrast search in a window around the current focus. Start with ±1 s and widen once if no crest is found, for a subject much nearer than the scene the board's curve suits. Take up the 0.45–0.7 s backlash before trusting the first steps of each reversal. Don't try to drive a parallel "focus-follows-zoom" curve from the host: the board already does it, and it ignores combined frames. This is the same split as a Sony FCB block module's internal focus trace with *Zoom Trigger AF*, or ONVIF's `OnceAfterMove` focus mode.
+
+**The degraded lens misled an earlier model.** OpenIPC's majestic-af autofocus modelled this lens on the unit's original, degraded lens (see *Second board*): a stored zoom→focus curve, a fixed 6.8 s "overshoot" after every zoom, and a 38 s focus travel. None of it holds on a healthy lens. That lens could not reach focus at all, so the board's tracking looked like a fixed offset. Measure lens constants on a lens that is known to be good.
+
+References, for anyone building zoom tracking where the SoC drives the steppers itself (no tracking board):
+- Pelco, *Pelco D Protocol Manual* v5.2.2, §3 and note 8: zoom and focus bits in one command.
+- Sony FCB block-camera technical manuals: *Focus Trace* inside the module, *Zoom Trigger AF*.
+- ONVIF Imaging Service specification: `AutoFocusMode = OnceAfterMove`.
+- Y. Kim et al., "A video camera system with enhanced zoom tracking and auto white balance", *IEEE Trans. Consumer Electronics*, 2002: geometric zoom tracking, interpolating between stored near and far trace curves.
+- T. Zou et al., "Robust feedback zoom tracking for digital video surveillance", *Sensors*, 2012: trace curves corrected by contrast feedback during the zoom.
+- Canon US 6967686 B1: zig-zag (wobble) focus around the trace curve during a zoom.
+- Rockchip's `ms41908_set_zoom_follow` and rkaiq zoom-focus tables, and XM's libxmaf `FocusLine_*`: the same trace-curve approach in shipping SoC camera code.
 
 ## Where the old xm-uart went wrong
 
@@ -237,3 +284,11 @@ These are in [`captures/`](captures/), in the `uart-bridge` JSONL format. Replay
 | `a5-burst-record.jsonl.gz` | stock zoom-in (DVRIP ZoomTile 1.5 s) from the wide stop, camera connected: the `C5` commands plus the live `A5` stream |
 | `a5-burst-with-a5.jsonl.gz`, `a5-burst-c5-only.jsonl.gz` | the recording replayed to the same board from the same start, with and without its `A5` frames; the post-zoom refocus is identical |
 | `focus-direction-sweeps.json` | per-step sharpness of the near, far and star targets for the three focus sweeps |
+| `tracking-zoom.json` | full zoom-in and zoom-out on both boards: centre sharpness at 5 fps and the zoom reports (`xm_tracking.py zoom`) |
+| `tracking-offset.json` | per board, X2.0–X5.0 reached by zoom alone: settled sharpness and a focus sweep through the crest (`offset`) |
+| `tracking-settle.json` | sharpness after the zoom stop, plain, with stop frames, and with a focus nudge during the settle (`settle`) |
+| `tracking-combined.json` | frames with zoom and focus bits together, against zoom alone (`combined`) |
+| `tracking-interleave.json` | a focus frame during a zoom, and a zoom frame during a focus move (`interleave`) |
+| `tracking-carry.json` | a 1 s focus nudge at the wide stop and at X2.0, then a zoom to X3.0 (`carry`) |
+| `tracking-backlash.json` | focus swept nearer then farther in 50 ms and 30 ms pulses at X3.0 (`backlash`) |
+| `tracking-stockzoom.json` | the vendor board: stock DVRIP zoom with the `A5` stream live, against the same zoom injected with the camera cut off (`stockzoom`) |

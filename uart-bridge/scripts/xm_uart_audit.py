@@ -499,38 +499,56 @@ def cmd_sync(a) -> None:
         raise SystemExit(1)
 
 
-def center_sharpness(a, r: int = 200) -> float:
-    """Tenengrad of the central (2r)^2 box, two frames averaged: higher is sharper."""
-    w, h, frames = gray_frames(a)
+def center_sharpness(a, r: int = 200, wait: float = 240) -> float:
+    """Tenengrad of the central (2r)^2 box, two frames averaged: higher is sharper.
+
+    The XM stock firmware restarts its services now and then under a long run of
+    short RTSP sessions (a focus sweep opens hundreds): RTSP, DVRIP and HTTP go
+    away for about two minutes, the camera still answers ping. Wait up to `wait`
+    s for it rather than lose the run."""
+    t0 = time.monotonic()
+    while True:
+        try:
+            w, h, frames = gray_frames(a)
+            break
+        except (CaptureError, subprocess.TimeoutExpired) as e:
+            if time.monotonic() - t0 > wait:
+                raise
+            print(f"  no video ({str(e).splitlines()[0][:80]}); waiting for the camera", flush=True)
+            time.sleep(10)
     return sum(tenengrad(f, w, w // 2, h // 2, r) for f in frames) / len(frames)
 
 
-def cmd_focusoffset(a) -> None:
-    """How far a board's tracked focus is from the camera's sharpest focus,
-    in seconds of focus drive (positive: sharper nearer). Sweep from `away`
-    s on the far side, after taking up backlash, in 0.1 s steps; then drive
-    back by the same amount (approximately: backlash)."""
+def focus_offset(a, tag: str = "fo", verbose: bool = True) -> tuple[list[float], float]:
+    """Sweep focus through the sharpest point and return (curve, offset): how
+    far the board's tracked focus is from the sharpest focus, in seconds of
+    focus drive (positive: sharper nearer). Sweep from `away` s on the far
+    side, after taking up backlash, in 0.1 s steps; then drive back by the
+    same amount (approximately: backlash). `tag` prefixes the capture names,
+    so sweeps on two boards at once do not collide. Raises SystemExit when
+    the curve has no peak inside the sweep."""
     near, far = frame(c2=0x80), frame(c1=0x01)
     ptz = a.ptz or None
     center_sharpness(a)  # pre-flight: fail before moving if there is no video
     curve = []
     driven = 0.0  # net drive toward near so far; undone below whatever happens
     try:
-        pulse("fo-away", far, hold=a.away, ptz=ptz)
+        pulse(f"{tag}-away", far, hold=a.away, ptz=ptz)
         driven -= a.away
-        pulse("fo-takeup", near, hold=0.15, ptz=ptz)
+        pulse(f"{tag}-takeup", near, hold=0.15, ptz=ptz)
         driven += 0.15
         for i in range(a.steps):
-            pulse("fo-step", near, hold=0.1, ptz=ptz)
+            pulse(f"{tag}-step", near, hold=0.1, ptz=ptz)
             driven += 0.1
             time.sleep(0.3)
             curve.append(center_sharpness(a))
-            print(f"  step {i + 1:2d}  sharpness {curve[-1]:9.1f}", flush=True)
+            if verbose:
+                print(f"  step {i + 1:2d}  sharpness {curve[-1]:9.1f}", flush=True)
     finally:
         if driven > 0:
-            pulse("fo-back", far, hold=driven, ptz=ptz)
+            pulse(f"{tag}-back", far, hold=driven, ptz=ptz)
         elif driven < 0:
-            pulse("fo-back", near, hold=-driven, ptz=ptz)
+            pulse(f"{tag}-back", near, hold=-driven, ptz=ptz)
     peak = peak_position(curve)
     if peak is None:
         raise SystemExit("flat sharpness curve: no texture in the centre, or nowhere near focus")
@@ -539,7 +557,13 @@ def cmd_focusoffset(a) -> None:
         raise SystemExit(f"no peak inside the sweep: sharpest at its {'start' if best == 0 else 'end'} "
                          f"({curve[best]:.1f}); widen --away/--steps")
     # step k sits at -away + 0.15 (take-up) + 0.1 k from where tracking had focus
-    print(f"sharpest at step {peak:.2f}; tracked focus offset {0.1 * peak + 0.15 - a.away:+.2f} s of drive "
+    return curve, round(0.1 * peak + 0.15 - a.away, 2)
+
+
+def cmd_focusoffset(a) -> None:
+    """How far a board's tracked focus is from the camera's sharpest focus."""
+    curve, offset = focus_offset(a)
+    print(f"sharpest at step {peak_position(curve):.2f}; tracked focus offset {offset:+.2f} s of drive "
           f"(positive: the sharpest point is nearer)")
 
 
