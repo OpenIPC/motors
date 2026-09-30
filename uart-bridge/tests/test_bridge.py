@@ -663,3 +663,11 @@ def test_muted_camera_bytes_are_not_replayed_or_diffed_as_board_traffic():
     live = [Record(0, C2P, ZOOM_IN), Record(50_000_000, C2P, IDLE[0])]
     divs = analysis.diff(analysis.events(live), evs)
     assert any(d.d == analysis.TO_PTZ for d in divs)
+
+
+def test_summaries_show_muted_junk():
+    from uart_bridge.cli import counts
+    from uart_bridge.log import C2M, Record
+    s = analysis.summarize(analysis.events([Record(0, C2M, b"\x00\x11" + IDLE[0])]))
+    text = counts(s)
+    assert "c2m=1" in text and "junk bytes" in text and text.endswith("c2m=2")
