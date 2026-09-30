@@ -80,6 +80,8 @@ class Bridge:
     """`uart-bridge bridge` in the background, with marks and probes on stdin."""
 
     def __init__(self, log: str, note: str, pty: bool = False):
+        self.log = HERE / log
+        self.log.unlink(missing_ok=True)  # the bridge never overwrites a capture
         args = [UV, "run", "uart-bridge", "bridge", "--quiet", "--note", note, "--log", log]
         if pty:
             args[4:4] = ["--cam", "pty"]
@@ -91,6 +93,8 @@ class Bridge:
                 self.path = m.group(1)
                 if not pty or self.path:
                     break
+        if self.p.poll() is not None or (pty and not self.path):
+            raise SystemExit(f"uart-bridge bridge did not start (exit {self.p.poll()})")
 
     def send(self, line: str) -> None:
         self.p.stdin.write(line + "\n")
@@ -119,25 +123,30 @@ def cmd_stock(a) -> None:
                 "Preset": preset, "Step": 5, "Tour": 0}
 
     def step(cmd, hold=0.5):
-        # python-dvr's ptz_step convention: Preset 65535 starts, -1 stops
+        # python-dvr's ptz_step convention: Preset 65535 starts, -1 stops.
+        # The board keeps moving until it gets a stop, so stop no matter what.
         br.send(f"{cmd} start")
         cam.set_command("OPPTZControl", {"Command": cmd, "Parameter": param(65535)})
-        time.sleep(hold)
-        br.send(f"{cmd} stop")
-        cam.set_command("OPPTZControl", {"Command": cmd, "Parameter": param(-1)})
+        try:
+            time.sleep(hold)
+        finally:
+            br.send(f"{cmd} stop")
+            cam.set_command("OPPTZControl", {"Command": cmd, "Parameter": param(-1)})
         time.sleep(1.5)
 
-    for c in ("ZoomTile", "ZoomWide", "FocusNear", "FocusFar", "IrisSmall", "IrisLarge",
-              "DirectionLeft", "DirectionRight", "DirectionUp", "DirectionDown",
-              "DirectionLeftUp", "DirectionRightDown"):
-        step(c)
-    for c in ("SetPreset", "GotoPreset", "ClearPreset"):
-        br.send(f"{c} {a.preset}")
-        cam.ptz(c, preset=a.preset)
-        time.sleep(2.5)
-    cam.close()
-    time.sleep(1)
-    br.close()
+    try:
+        for c in ("ZoomTile", "ZoomWide", "FocusNear", "FocusFar", "IrisSmall", "IrisLarge",
+                  "DirectionLeft", "DirectionRight", "DirectionUp", "DirectionDown",
+                  "DirectionLeftUp", "DirectionRightDown"):
+            step(c)
+        for c in ("SetPreset", "GotoPreset", "ClearPreset"):
+            br.send(f"{c} {a.preset}")
+            cam.ptz(c, preset=a.preset)
+            time.sleep(2.5)
+    finally:
+        cam.close()
+        time.sleep(1)
+        br.close()
     print("capture: captures/e1-stock.jsonl  (uv run uart-bridge decode ...)")
 
 
@@ -272,18 +281,22 @@ def cmd_refocus(a) -> None:
     print(f"done blur={sharpness_blur(a):.2f}")
 
 
-def resync_camera_osd() -> None:
+def resync_camera_osd() -> list[float]:
     """The camera shows the last zoom report *it* received. Everything sent
     by inject bypassed it, so nudge the zoom in and back through the bridge
-    to hand it a current report."""
+    to hand it a current report. Returns the reports seen, since the nudge
+    itself moves the lens."""
     br = Bridge("captures/osd-resync.jsonl", "resync camera OSD zoom")
-    for cmd in (ZOOM_IN, ZOOM_OUT):
-        time.sleep(1.0)
-        br.send("!" + cmd)
-        time.sleep(0.12)
-        br.send("!" + STOP)
-    time.sleep(1.5)
-    br.close()
+    try:
+        for cmd in (ZOOM_IN, ZOOM_OUT):
+            time.sleep(1.0)
+            br.send("!" + cmd)
+            time.sleep(0.12)
+            br.send("!" + STOP)
+        time.sleep(1.5)
+    finally:
+        br.close()
+    return zooms(br.log)
 
 
 def cmd_restore(a) -> None:
@@ -293,9 +306,14 @@ def cmd_restore(a) -> None:
             raise SystemExit("no zoom reports from the board")
         now = z[-1]
         if abs(now - a.zoom) < 0.05:
-            print("zoom", now)
-            resync_camera_osd()
-            return
+            # Only done once the camera has seen a report on target: the
+            # resync nudge moves the lens too, so measure what it left.
+            z = resync_camera_osd()
+            if z and abs(z[-1] - a.zoom) < 0.05:
+                print("zoom", z[-1], "(camera OSD in sync)")
+                return
+            print("resync left zoom at", z[-1] if z else "?", "- correcting")
+            continue
         wide = now > a.zoom
         z = pulse(f"restore-{i}", ZOOM_OUT if wide else ZOOM_IN,
                   hold=min(0.4, 0.1 + abs(now - a.zoom) / 4))

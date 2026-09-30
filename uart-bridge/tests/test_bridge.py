@@ -448,3 +448,31 @@ def test_quiet_camera_line_first_frame_is_forwarded_immediately():
     cam.close()
     for fd in (ptz_m, ptz_s):
         os.close(fd)
+
+
+def test_joining_mid_frame_keeps_a_command_in_the_same_read():
+    assert bridge.trailing_commands(IDLE[0][3:] + ZOOM_IN) == 5
+    assert bridge.trailing_commands(IDLE[0][3:] + IDLE[1]) is None          # A5 alone: not trusted
+    assert bridge.trailing_commands(IDLE[0][3:] + ZOOM_IN + IDLE[1]) == 5
+    assert bridge.trailing_commands(IDLE[0][3:]) is None
+    cam_m, cam_path, cam_s = pty_port()
+    ptz_m, ptz_path, ptz_s = pty_port()
+    cam = bridge.open_port(cam_path, 115200)
+    ptz = bridge.open_port(ptz_path, 115200)
+    stopper, th = run_bridge_thread(cam, ptz, cam_last_ns=time.monotonic_ns())  # camera was busy
+    try:
+        os.write(cam_m, IDLE[0][3:] + ZOOM_IN)   # tail + a command, one read, no gap
+        assert read_exact(ptz_m, 16, timeout=0.5) == ZOOM_IN
+    finally:
+        stopper.stop = True
+        th.join(2)
+    for fd in (cam_m, cam_s, ptz_m, ptz_s):
+        os.close(fd)
+
+
+def test_pty_write_gives_up_when_nobody_reads():
+    cam = bridge.PtyPort()
+    t = time.monotonic()
+    n = cam.write(b"\xef" * 1_000_000)
+    assert n < 1_000_000 and time.monotonic() - t < 0.5
+    cam.close()

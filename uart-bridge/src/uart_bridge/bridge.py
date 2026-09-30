@@ -56,14 +56,20 @@ class PtyPort:
         except BlockingIOError:
             return b""
 
+    WRITE_DEADLINE_S = 0.05
+
     def write(self, data: bytes) -> int:
+        """Write what the pty takes within WRITE_DEADLINE_S and return that
+        count. With no tool reading the slave the queue fills up; blocking
+        there would stall the whole bridge, so the rest is dropped."""
         view = memoryview(data)
-        while view:
+        end = time.monotonic() + self.WRITE_DEADLINE_S
+        while view and time.monotonic() < end:
             try:
                 view = view[os.write(self.master, view):]
             except BlockingIOError:
                 time.sleep(0.001)
-        return len(data)
+        return len(data) - len(view)
 
     @property
     def in_waiting(self) -> int:
@@ -76,6 +82,25 @@ class PtyPort:
     def close(self) -> None:
         os.close(self.master)
         os.close(self._slave)
+
+
+def trailing_commands(data: bytes) -> int | None:
+    """Offset of a run of whole frames that ends `data` and contains at
+    least one checkable command (C5 ... 5C), or None.
+
+    Used while joining the camera stream mid-frame: a read that merges the
+    tail of one frame with complete frames behind it has no timing to tell
+    where the tail ends, but a C5 frame carries its own 5C end byte. A5
+    frames do not, so a tail of A5 frames alone is not trusted."""
+    for p in range(1, len(data) - 7):
+        rest = data[p:]
+        if len(rest) % 8:
+            continue
+        chunks = [rest[i:i + 8] for i in range(0, len(rest), 8)]
+        if all(c[0] in SYNC_BYTES and (c[0] != 0xC5 or c[7] == 0x5C) for c in chunks) \
+                and any(c[0] == 0xC5 for c in chunks):
+            return p
+    return None
 
 
 def open_port(path: str, baud: int) -> serial.Serial:
@@ -264,12 +289,22 @@ def run(
                     if gap >= FRAME_GAP_NS and data[0] in SYNC_BYTES:
                         cam_synced = True
                     else:
-                        note = f"joined camera mid-frame, not forwarded: {data.hex(' ')}"
+                        p = trailing_commands(data)
+                        skipped = data if p is None else data[:p]
+                        note = f"joined camera mid-frame, not forwarded: {skipped.hex(' ')}"
                         writer.mark(t, note)
                         if on_mark:
                             on_mark(t, note)
-                        continue
-                dst.write(data)
+                        if p is None:
+                            continue
+                        data = data[p:]
+                        cam_synced = True
+                written = dst.write(data)
+                if written is not None and written < len(data):
+                    note = f"{d}: {len(data) - written} bytes dropped, nobody reading the pty"
+                    writer.mark(t, note)
+                    if on_mark:
+                        on_mark(t, note)
                 writer.data(t, d, data)
                 stats.bytes[d] += len(data)
                 stats.reads[d] += 1

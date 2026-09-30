@@ -322,7 +322,20 @@ int main(int argc, char *argv[]) {
       }
       if (n > 0)
         parse_incoming(rbuf, (size_t)n);
+      else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+        printf("UART read: %s\n", strerror(errno));
+        break;
+      }
     }
+    /* A hangup or error would otherwise make poll() return at once forever
+     * (readable bytes, if any, were handled above); leave through the stop
+     * below instead. */
+    if (pfds[1].revents & (POLLHUP | POLLERR | POLLNVAL)) {
+      printf("UART hung up or failed\n");
+      break;
+    }
+    if (pfds[0].revents & (POLLERR | POLLNVAL))
+      break;
     fflush(stdout);
   }
 
