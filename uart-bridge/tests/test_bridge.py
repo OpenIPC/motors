@@ -753,3 +753,40 @@ def test_boards_compares_settled_zoom_positions(tmp_path, capsys):
     assert "match" in capsys.readouterr().out
     assert main(["boards", str(p), "--tolerance", "0.05"]) == 1
     assert "MISMATCH" in capsys.readouterr().out
+
+
+def test_tee_failure_drops_the_tee_but_bridging_continues():
+    srv = socket_server()
+    cam_m, cam_path, cam_s = pty_port()
+    ptz_m, ptz_path, ptz_s = pty_port()
+    cam = bridge.open_port(cam_path, 115200)
+    ptz = bridge.open_port(ptz_path, 115200)
+    tee = bridge.open_port(f"socket://127.0.0.1:{srv.getsockname()[1]}", 115200)
+    remote, _ = srv.accept()
+    log = io.StringIO()
+    stopper, th = run_bridge_thread(cam, ptz, log, tee=tee)
+    try:
+        time.sleep(0.02)
+        remote.close()                                  # the second camera goes away
+        srv.close()
+        time.sleep(0.05)
+        for f in (ZOOM_IN, IDLE[0], IDLE[1]):
+            os.write(cam_m, f)
+            time.sleep(0.02)
+        assert read_exact(ptz_m, 24) == ZOOM_IN + IDLE[0] + IDLE[1]   # reference board unaffected
+        assert th.is_alive()
+    finally:
+        stopper.stop = True
+        th.join(2)
+    assert "tee failed" in log.getvalue()
+    for fd in (cam_m, cam_s, ptz_m, ptz_s):
+        os.close(fd)
+
+
+def test_boards_with_no_reports_is_a_mismatch(tmp_path, capsys):
+    from uart_bridge.cli import main
+    p = tmp_path / "empty.jsonl"
+    with open(p, "w") as fp:
+        LogWriter(fp, {"mode": "bridge"}).data(0, C2P, IDLE[0])
+    assert main(["boards", str(p)]) == 1
+    assert "nothing was compared" in capsys.readouterr().out

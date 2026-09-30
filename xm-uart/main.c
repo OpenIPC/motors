@@ -18,6 +18,7 @@
 #include <string.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <termios.h>
@@ -52,8 +53,17 @@ static void on_signal(int sig) {
 /* The board parses a fixed 8-byte frame from any C5 or A5 byte and has no
  * inter-byte timeout: a short write would make it swallow the next command.
  * So every frame goes out whole. */
+static long long now_ms(void);
+
+/* Bounded: gives up (-1, EAGAIN) after 2 s so a stuck UART cannot hang the
+ * loop that has to send the stop frames. */
 static int write_all(int fd, const uint8_t *buf, size_t len) {
+  long long deadline = now_ms() + 2000;
   while (len) {
+    if (now_ms() > deadline) {
+      errno = EAGAIN;
+      return -1;
+    }
     ssize_t n = write(fd, buf, len);
     if (n < 0) {
       if (errno == EINTR)
@@ -106,6 +116,8 @@ static void send_stop(void) { send_frame(0, 0, 0, 0); }
 #define PARTIAL_TIMEOUT_MS 300
 
 static int client_fd = -1;
+static struct in_addr allowed_client; /* -a: the only address let in */
+static bool allow_any = true;
 static uint8_t net_frame[8];
 static size_t net_len;
 static long long net_started_ms;
@@ -120,7 +132,26 @@ static long long now_ms(void) {
 /* Reassemble with the board's own rule: an A5 or C5 byte starts an 8-byte
  * frame. Only whole frames are written, since the board's parser has no
  * inter-byte timeout and a partial one would swallow the next command. */
+static void net_expire(void);
+
+/* Bytes the UART has yet to send; a network frame is written only when it
+ * fits whole, so a client outpacing 115200 baud loses whole frames, never
+ * leaves half a one on the board's wire, and never blocks this loop. */
+#define UART_QUEUE_LIMIT 2048
+
+static void net_write_frame(void) {
+  int queued = 0;
+  if (ioctl(uart, TIOCOUTQ, &queued) == 0 && queued > UART_QUEUE_LIMIT) {
+    net_dropped += sizeof(net_frame);
+    return;
+  }
+  if (write_all(uart, net_frame, sizeof(net_frame)) < 0)
+    fprintf(stderr, "write: %s\n", strerror(errno));
+  net_frames++;
+}
+
 static void net_feed(const uint8_t *data, size_t len) {
+  net_expire(); /* a late tail must not complete a frame that already timed out */
   for (size_t i = 0; i < len; i++) {
     uint8_t b = data[i];
     if (net_len == 0) {
@@ -132,9 +163,7 @@ static void net_feed(const uint8_t *data, size_t len) {
     }
     net_frame[net_len++] = b;
     if (net_len == sizeof(net_frame)) {
-      if (write_all(uart, net_frame, sizeof(net_frame)) < 0)
-        fprintf(stderr, "write: %s\n", strerror(errno));
-      net_frames++;
+      net_write_frame();
       net_len = 0;
     }
   }
@@ -155,6 +184,28 @@ static void net_close_client(const char *why) {
   printf("Client %s after %lu frames (%lu bytes dropped); stop\n", why, net_frames,
          net_dropped);
   send_stop(); /* never leave a motor running for a sender that vanished */
+}
+
+static void net_close_client(const char *why);
+
+/* Board replies to the client, whole: the socket is nonblocking, so a peer
+ * that stops reading is dropped (and the lens stopped) instead of freezing
+ * the loop or silently losing part of a reply. */
+static void net_send_reply(const uint8_t *data, size_t len) {
+  long long deadline = now_ms() + 200;
+  while (len && client_fd >= 0) {
+    ssize_t n = send(client_fd, data, len, MSG_NOSIGNAL);
+    if (n > 0) {
+      data += n;
+      len -= (size_t)n;
+    } else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) &&
+               now_ms() < deadline) {
+      struct pollfd p = {.fd = client_fd, .events = POLLOUT};
+      poll(&p, 1, 20);
+    } else {
+      net_close_client("not reading replies");
+    }
+  }
 }
 
 static int net_listen(int port) {
@@ -179,6 +230,11 @@ static void net_accept(int listen_fd) {
   int fd = accept(listen_fd, (struct sockaddr *)&a, &alen);
   if (fd < 0)
     return;
+  if (!allow_any && a.sin_addr.s_addr != allowed_client.s_addr) {
+    printf("Refused %s: not the allowed client\n", inet_ntoa(a.sin_addr));
+    close(fd);
+    return;
+  }
   if (client_fd >= 0) {
     printf("Refused %s: a client is already connected\n", inet_ntoa(a.sin_addr));
     close(fd);
@@ -186,6 +242,16 @@ static void net_accept(int listen_fd) {
   }
   int one = 1;
   setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+  /* A client that vanishes without FIN/RST is found in ~11 s and the lens
+   * stopped, instead of the last move running on forever. */
+  setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one));
+#ifdef TCP_KEEPIDLE
+  int idle = 5, intvl = 2, cnt = 3;
+  setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
+  setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
+  setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
+#endif
+  fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
   client_fd = fd;
   net_frames = net_dropped = 0;
   printf("Client %s connected\n", inet_ntoa(a.sin_addr));
@@ -269,10 +335,12 @@ static void parse_incoming(const uint8_t *data, size_t size) {
 }
 
 static void usage(const char *argv0) {
-  printf("Usage: %s [-d tty] [-l port]\n", argv0);
+  printf("Usage: %s [-d tty] [-l port [-a client-ip]]\n", argv0);
   printf("\t-d tty device, default /dev/ttyAMA0\n");
   printf("\t-l listen on this TCP port: frames from the client go to the lens\n"
-         "\t   board whole, its replies go back (stdin EOF does not quit)\n\n");
+         "\t   board whole, its replies go back (stdin EOF does not quit)\n");
+  printf("\t-a with -l: accept only this client address (anyone on the network\n"
+         "\t   could otherwise drive the lens)\n\n");
   printf("Keys: + - zoom in/out, z x focus near/far, h l pan left/right,\n"
          "      j k tilt down/up, Space or Enter stop, q quit\n");
 }
@@ -302,10 +370,17 @@ int main(int argc, char *argv[]) {
   const char *device = "/dev/ttyAMA0";
   int port = 0, c;
 
-  while ((c = getopt(argc, argv, "d:l:h")) != -1) {
+  while ((c = getopt(argc, argv, "d:l:a:h")) != -1) {
     switch (c) {
     case 'd':
       device = optarg;
+      break;
+    case 'a':
+      if (!inet_aton(optarg, &allowed_client)) {
+        fprintf(stderr, "bad client address: %s\n", optarg);
+        return 1;
+      }
+      allow_any = false;
       break;
     case 'l':
       port = atoi(optarg);
@@ -344,6 +419,8 @@ int main(int argc, char *argv[]) {
       fprintf(stderr, "listen on port %d: %s\n", port, strerror(errno));
       return 1;
     }
+    if (allow_any)
+      fprintf(stderr, "warning: no -a, any host that reaches port %d can move the lens\n", port);
   }
   bool stdin_open = true;
 
@@ -444,8 +521,8 @@ int main(int argc, char *argv[]) {
         break;
       }
       if (n > 0) {
-        if (client_fd >= 0 && send(client_fd, rbuf, (size_t)n, 0) < 0)
-          net_close_client("lost");
+        if (client_fd >= 0)
+          net_send_reply(rbuf, (size_t)n);
         parse_incoming(rbuf, (size_t)n);
       } else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
         printf("UART read: %s\n", strerror(errno));

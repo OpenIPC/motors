@@ -258,6 +258,10 @@ def cmd_boards(a: argparse.Namespace) -> int:
         print(f"  #{i + 1:<3} A {fmt_t(x[0]) + f'  X{x[1]:.1f}' if x else '       -':>18}   "
               f"B {fmt_t(y[0]) + f'  X{y[1]:.1f}' if y else '       -':>18}   "
               + ("missing" if diff is None else f"diff {diff:.1f}"))
+    if not sa or not sb:
+        print("MISMATCH: no zoom positions from " + ("either board" if not sa and not sb else
+              "board A" if not sa else "board B") + "; nothing was compared")
+        return 1
     mismatch = len(sa) != len(sb) or worst > a.tolerance + 1e-9
     print(f"{'MISMATCH' if mismatch else 'match'}: max difference {worst:.1f} (tolerance {a.tolerance})")
     return 1 if mismatch else 0

@@ -513,15 +513,24 @@ def cmd_focusoffset(a) -> None:
     near, far = frame(c2=0x80), frame(c1=0x01)
     ptz = a.ptz or None
     center_sharpness(a)  # pre-flight: fail before moving if there is no video
-    pulse("fo-away", far, hold=a.away, ptz=ptz)
-    pulse("fo-takeup", near, hold=0.15, ptz=ptz)
     curve = []
-    for i in range(a.steps):
-        pulse("fo-step", near, hold=0.1, ptz=ptz)
-        time.sleep(0.3)
-        curve.append(center_sharpness(a))
-        print(f"  step {i + 1:2d}  sharpness {curve[-1]:9.1f}", flush=True)
-    pulse("fo-back", far, hold=0.1 * a.steps - a.away + 0.15, ptz=ptz)
+    driven = 0.0  # net drive toward near so far; undone below whatever happens
+    try:
+        pulse("fo-away", far, hold=a.away, ptz=ptz)
+        driven -= a.away
+        pulse("fo-takeup", near, hold=0.15, ptz=ptz)
+        driven += 0.15
+        for i in range(a.steps):
+            pulse("fo-step", near, hold=0.1, ptz=ptz)
+            driven += 0.1
+            time.sleep(0.3)
+            curve.append(center_sharpness(a))
+            print(f"  step {i + 1:2d}  sharpness {curve[-1]:9.1f}", flush=True)
+    finally:
+        if driven > 0:
+            pulse("fo-back", far, hold=driven, ptz=ptz)
+        elif driven < 0:
+            pulse("fo-back", near, hold=-driven, ptz=ptz)
     peak = peak_position(curve)
     if peak is None:
         raise SystemExit("flat sharpness curve: no texture in the centre, or nowhere near focus")
@@ -540,8 +549,7 @@ def cmd_twin(a) -> None:
         cmd_sync(a)
     log = f"captures/twin-{time.strftime('%H%M%S')}.jsonl"
     br = Bridge(log, "twin: vendor DVRIP session teed to the OpenIPC board", extra=("--tee", a.openipc))
-    time.sleep(2)
-    cam = Dvrip(a, br)
+    cam = None
     vendor = argparse.Namespace(camera=a.camera, user=a.user, password=a.password, rtsp=None)
     other = argparse.Namespace(rtsp=a.openipc_rtsp)
 
@@ -551,17 +559,22 @@ def cmd_twin(a) -> None:
         print(f"{label:22s} sharpness vendor {v:9.1f}   openipc {o:9.1f}", flush=True)
 
     try:
+        time.sleep(2)
+        cam = Dvrip(a, br)  # inside try: a failed login must still stop the bridge
         checkpoint("start (wide)")
         for cmd, hold in (("ZoomTile", 1.5), ("ZoomTile", 1.5), ("ZoomWide", 0.8), ("FocusNear", 0.4),
                           ("FocusFar", 0.4), ("ZoomWide", 4.0)):
             cam.step(cmd, hold=hold, settle=2.0)
             checkpoint(f"after {cmd} {hold}s")
     finally:
-        cam.close()
+        if cam is not None:
+            cam.close()
         time.sleep(1)
         br.close()
     print(f"capture: {log}")
-    uart_bridge("boards", log)
+    rc = uart_bridge("boards", log).returncode
+    if rc:
+        raise SystemExit(rc)  # the boards did not settle alike
 
 
 def cmd_restore(a) -> None:
@@ -661,7 +674,7 @@ def main() -> None:
     r.add_argument("--zoom", type=float, default=1.2)
     r.set_defaults(func=cmd_restore)
     a = p.parse_args()
-    if getattr(a, "camera", "x") is None and not getattr(a, "rtsp", None) and a.cmd != "focusoffset":
+    if getattr(a, "camera", "x") is None and not getattr(a, "rtsp", None):
         p.error("--camera or --rtsp is required")
     if a.cmd == "focusdir":
         a.near = a.near or ["chair_mesh=200,300,90"]

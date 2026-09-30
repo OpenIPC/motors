@@ -44,7 +44,9 @@ scp -O xm-uart-motors-openipc root@CAM:/usr/bin/xm-uart
 scp -O ../xm-uart/S99xm-uart-relay root@CAM:/etc/init.d/ && ssh root@CAM 'chmod +x /etc/init.d/S99xm-uart-relay && /etc/init.d/S99xm-uart-relay start'
 ```
 
-The relay writes only **whole frames** to the board. A partial frame is dropped after 300 ms, and stray bytes are dropped. It sends a stop frame when its client disconnects, and it returns the board's replies to the client. It serves one client at a time and refuses a second.
+**Set `CLIENT` in the init script to the uart-bridge host's address** before starting it. The relay is unauthenticated, so `-a CLIENT` is what stops any other host on the network from driving the lens; the script refuses to start without it.
+
+The relay writes only **whole frames** to the board. A partial frame is dropped after 300 ms, and stray bytes are dropped. It sends a stop frame when its client disconnects, and it returns the board's replies to the client. It serves one client at a time and refuses a second. A client that vanishes without closing is noticed within ~11 s through TCP keepalive, and the lens is stopped. A client that sends faster than the UART can transmit loses whole frames, never half of one.
 
 **Check that the second board is really there before trusting anything:**
 

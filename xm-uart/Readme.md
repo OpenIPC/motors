@@ -28,7 +28,7 @@ Zoom reports from the board are printed as `Zoom X1.4`.
 ### Network relay (`-l`)
 
 ```sh
-xm-uart-motors-openipc -d /dev/ttyAMA0 -l 9000 </dev/null &
+xm-uart-motors-openipc -d /dev/ttyAMA0 -l 9000 -a 192.0.2.10 </dev/null &   # -a: the only client allowed
 ```
 
 This relays a TCP client's frames to the lens board and sends the board's replies back:

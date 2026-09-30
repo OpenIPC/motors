@@ -223,8 +223,25 @@ def run(
     sel.register(ptz.fileno(), selectors.EVENT_READ, (ptz, cam, P2C))
     if control is not None:
         sel.register(control, selectors.EVENT_READ, None)
+    tee_box = [tee]  # set to None once the tee fails; the bridge itself carries on
     if tee is not None:
         sel.register(tee.fileno(), selectors.EVENT_READ, (tee, None, T2C))
+
+    def drop_tee(t: int, err: Exception) -> None:
+        dead = tee_box[0]
+        tee_box[0] = None
+        note = f"tee failed ({err}); dropped it, bridging continues"
+        writer.mark(t, note)
+        if on_mark:
+            on_mark(t, note)
+        try:
+            sel.unregister(dead.fileno())
+        except (KeyError, ValueError, OSError):
+            pass
+        try:
+            dead.close()
+        except Exception:
+            pass
     pending = b""
     probes: list[bytes] = []
     cam_framer = Framer(CAM_RULES)
@@ -254,11 +271,15 @@ def run(
                 on_data(t, H2P, probe)
         probes.clear()
     def to_tee(t: int, items) -> None:
-        if tee is None:
-            return
         for item in items:
+            if tee_box[0] is None:
+                return
             if isinstance(item, Frame):
-                tee.write(item.data)
+                try:
+                    tee_box[0].write(item.data)
+                except (serial.SerialException, OSError) as e:
+                    drop_tee(t, e)
+                    return
                 writer.data(t, C2T, item.data)
                 stats.bytes[C2T] += len(item.data)
                 stats.reads[C2T] += 1
@@ -313,7 +334,14 @@ def run(
                     send_probes(t)
                     continue
                 src, dst, d = key.data
-                data = src.read(4096)
+                if d == T2C:
+                    try:
+                        data = src.read(4096)
+                    except (serial.SerialException, OSError) as e:
+                        drop_tee(t, e)
+                        continue
+                else:
+                    data = src.read(4096)
                 if not data:
                     continue
                 if d == T2C:  # the second board's replies: logged, not passed on

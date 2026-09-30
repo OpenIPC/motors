@@ -46,11 +46,10 @@ def read_board(fd, n, timeout=1.0):
     return buf
 
 
-@pytest.fixture
-def relay(xm_uart):
+def start_relay(xm_uart, *extra):
     board, slave = os.openpty()
     port = free_port()
-    proc = subprocess.Popen([str(xm_uart), "-d", os.ttyname(slave), "-l", str(port)],
+    proc = subprocess.Popen([str(xm_uart), "-d", os.ttyname(slave), "-l", str(port), *extra],
                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     for _ in range(100):  # wait for the listener
         try:
@@ -59,11 +58,21 @@ def relay(xm_uart):
         except OSError:
             time.sleep(0.02)
     read_board(board, 64, timeout=0.3)  # the probe connection's disconnect sends a stop
-    yield board, port, proc
+    return board, slave, port, proc
+
+
+def stop_relay(board, slave, proc):
     proc.terminate()
     proc.wait(timeout=3)
     os.close(board)
     os.close(slave)
+
+
+@pytest.fixture
+def relay(xm_uart):
+    board, slave, port, proc = start_relay(xm_uart, "-a", "127.0.0.1")
+    yield board, port, proc
+    stop_relay(board, slave, proc)
 
 
 def connect(port):
@@ -116,3 +125,25 @@ def test_disconnect_sends_stop_and_second_client_is_refused(relay):
     assert read_board(board, 8) == ZOOM_IN
     s.close()                                        # sender vanishes mid-move
     assert read_board(board, 8) == STOP
+
+
+def test_late_tail_does_not_complete_an_expired_frame(relay):
+    board, port, _ = relay
+    s = connect(port)
+    s.sendall(ZOOM_IN[:5])
+    time.sleep(0.35)                                 # past the 300 ms partial-frame deadline
+    s.sendall(ZOOM_IN[5:] + STOP)                    # the late tail arrives together with a stop
+    assert read_board(board, 16, timeout=0.5) == STOP
+    s.close()
+
+
+def test_client_from_another_address_is_refused(xm_uart):
+    board, slave, port, proc = start_relay(xm_uart, "-a", "10.255.255.1")
+    try:
+        s = socket.create_connection(("127.0.0.1", port), timeout=1)
+        s.settimeout(1)
+        assert s.recv(8) == b""                      # closed at once: not the allowed client
+        s.close()
+        assert read_board(board, 8, timeout=0.3) == b""
+    finally:
+        stop_relay(board, slave, proc)
