@@ -43,7 +43,9 @@ import xm_uart_audit as A  # noqa: E402
 NEARER, FARTHER = A.frame(c2=0x80), A.frame(c1=0x01)  # measured: PROTOCOL.md, focus direction
 W, H = 640, 360
 WIDE_S = 6.5    # zoom-out time that reaches the wide stop from anywhere (full range is 5.6 s)
-SETTLE_S = 8.0  # wait after a zoom stop before measuring (the settle is measured by `settle`)
+# Wait after a zoom stop before measuring. The board's last focus move came as late as 9.4 s
+# (`settle`); the published offset/carry/stockzoom runs used 8 s, before that was known.
+SETTLE_S = 12.0
 # zoom-in time from the wide stop to each ratio (the same on both boards measured)
 LEVELS = {"X2.0": 1.6, "X3.0": 2.8, "X4.0": 4.1, "X5.0": 6.5}
 
@@ -77,22 +79,61 @@ class Board:
             return {"error": str(e)}
         return {"offset_s": offset, "best": max(curve), "curve": curve}
 
-    def video(self, tag: str, lead: float, records, seconds: float) -> tuple[list, list[float]]:
-        """Record `seconds` of video; `lead` s in, inject `records`. Returns the
-        centre-sharpness timeline (t_s, value) at 5 fps and the zoom reports."""
+    def video(self, tag: str, lead: float, records, seconds: float) -> tuple[list, list[float], float]:
+        """Record `seconds` of video and inject `records` about `lead` s into it.
+        Returns the centre-sharpness timeline (t_s, value) at 5 fps, the zoom
+        reports, and when the injection started on that timeline (dated from
+        ffmpeg's own progress; the camera's encode and network latency, a few
+        hundred ms, is not in it)."""
         out = A.CAPTURES / f"trk-{self.name}-{tag}.mkv"
-        rec = subprocess.Popen(["ffmpeg", "-loglevel", "error", "-rtsp_transport", "tcp", "-i", self.rtsp,
-                                "-t", str(seconds), "-c", "copy", "-y", str(out)])
-        time.sleep(lead)
-        z = self.inject(tag, records, tail=max(1.0, seconds - lead - records[-1][0] - 1))
-        rec.wait()
-        return timeline(out), z
+        # Frames are timestamped when they ARRIVE: an RTSP server may open with frames it
+        # buffered earlier, which with the stream's own timestamps would put the start of
+        # the video seconds in the past. Received, they pile up at t~0 instead.
+        rec = subprocess.Popen(["ffmpeg", "-loglevel", "error", "-rtsp_transport", "tcp",
+                                "-use_wallclock_as_timestamps", "1", "-i", self.rtsp,
+                                "-t", str(seconds), "-c", "copy", "-y", str(out),
+                                "-progress", "pipe:1", "-stats_period", "0.1"],
+                               stdout=subprocess.PIPE, text=True)
+        first = {}
+        started = threading.Event()
+
+        def progress():
+            # ffmpeg reports how much video it has written (out_time_us), every 0.1 s.
+            # The first report with video in it dates t=0 of the timeline: now minus
+            # that much. The file itself is no clock -- ffmpeg buffers its writes.
+            for line in rec.stdout:
+                if not started.is_set() and line.startswith("out_time_us="):
+                    us = line.split("=", 1)[1].strip()
+                    if us.isdigit() and int(us) > 0:
+                        first["t0"] = time.monotonic() - int(us) / 1e6
+                        started.set()
+
+        reader = threading.Thread(target=progress, daemon=True)
+        reader.start()
+        try:
+            if not started.wait(20):
+                raise A.CaptureError(f"no video from {self.name} (ffmpeg exit {rec.poll()})")
+            t0 = first["t0"]
+            time.sleep(max(0.0, t0 + lead - time.monotonic()))
+            cmd_at = time.monotonic() - t0
+            z = self.inject(tag, records, tail=max(1.0, seconds - lead - records[-1][0] - 1))
+            if rec.wait() != 0:
+                raise A.CaptureError(f"recording failed on {self.name} (ffmpeg exit {rec.returncode})")
+        finally:
+            if rec.poll() is None:
+                rec.terminate()
+                rec.wait()
+        return timeline(out), z, round(cmd_at, 2)
 
 
 def timeline(path: Path, fps: int = 5) -> list[tuple[float, float]]:
-    raw = subprocess.run(["ffmpeg", "-loglevel", "error", "-i", str(path), "-vf",
+    dec = subprocess.run(["ffmpeg", "-loglevel", "error", "-i", str(path), "-vf",
                           f"fps={fps},scale={W}:{H},format=gray", "-f", "rawvideo", "-"],
-                         capture_output=True).stdout
+                         capture_output=True)
+    raw = dec.stdout
+    if dec.returncode != 0 or len(raw) < W * H:
+        raise A.CaptureError(f"could not decode {path.name} (ffmpeg exit {dec.returncode}): "
+                             f"{dec.stderr.decode(errors='replace').strip()[:200]}")
     return [(i / fps, round(A.tenengrad(raw[i * W * H:(i + 1) * W * H], W, W // 2, H // 2, 120), 1))
             for i in range(len(raw) // (W * H))]
 
@@ -106,8 +147,8 @@ def exp_zoom(b: Board) -> dict:
     time.sleep(3)
     out = {}
     for label, cmd in (("in", A.ZOOM_IN), ("out", A.ZOOM_OUT)):
-        sharp, z = b.video(f"zoom-{label}", 2.0, [(0, cmd), (7.0, A.STOP)], 20)
-        out[label] = {"cmd_at": 2.0, "stop_at": 9.0, "sharp": sharp, "reports": z}
+        sharp, z, cmd_at = b.video(f"zoom-{label}", 2.0, [(0, cmd), (7.0, A.STOP)], 20)
+        out[label] = {"cmd_at": cmd_at, "stop_at": cmd_at + 7.0, "sharp": sharp, "reports": z}
         say(b, f"zoom {label}: {z[0] if z else '?'} -> {z[-1] if z else '?'} in {len(z)} reports, "
                f"sharpness every 1 s:", " ".join(f"{s:.0f}" for _, s in sharp[::5]))
     return out
@@ -140,8 +181,8 @@ def exp_settle(b: Board) -> dict:
             b.pulse("wide", A.ZOOM_OUT, WIDE_S)
             time.sleep(SETTLE_S)
             seq = [(0, A.ZOOM_IN), (hold, A.STOP)] + [(hold + t, f) for t, f in extra]
-            sharp, z = b.video(f"settle-{level}-{name.split()[0]}", 2.0, seq, 2.0 + hold + 16)
-            stop = 2.0 + hold
+            sharp, z, cmd_at = b.video(f"settle-{level}-{name.split()[0]}", 2.0, seq, 2.0 + hold + 16)
+            stop = cmd_at + hold
             out[f"{level} {name}"] = {"stop_at": stop, "sharp": sharp, "reports": z}
             say(b, level, f"{name:46s} after stop, every 1 s:",
                 " ".join(f"{s:.0f}" for t, s in sharp if t >= stop and round((t - stop) * 5) % 5 == 0))
@@ -295,13 +336,16 @@ EXPERIMENTS = {"zoom": exp_zoom, "offset": exp_offset, "settle": exp_settle, "co
                "stockzoom": exp_stockzoom}
 
 
-def run(boards: list[Board], name: str) -> None:
+def run(boards: list[Board], name: str) -> list[str]:
+    """Run one experiment on every board in parallel; returns the boards that failed."""
     results: dict = {}
 
     def one(b: Board) -> None:
         try:
             results[b.name] = EXPERIMENTS[name](b)
-        except Exception as e:  # keep the other board's results
+        except (Exception, SystemExit) as e:  # keep the other board's results
+            # (SystemExit too: the audit helpers use it for a bridge or a DVRIP
+            # login that fails, and in a worker thread it would vanish silently)
             results[b.name] = {"error": f"{type(e).__name__}: {e}"}
             say(b, "FAILED", results[b.name]["error"])
 
@@ -314,6 +358,8 @@ def run(boards: list[Board], name: str) -> None:
     out = A.CAPTURES / f"tracking-{name}.json"
     out.write_text(json.dumps(results))
     print("saved", out, flush=True)
+    failed = [n for n, r in results.items() if isinstance(r, dict) and "error" in r]
+    return failed
 
 
 def main() -> None:
@@ -334,11 +380,14 @@ def main() -> None:
     if len({b.name for b in boards}) != len(boards):
         p.error("board names must differ (they name the captures)")
     everything = [e for e in EXPERIMENTS if e != "stockzoom" or a.camera]
+    failed: list[str] = []
     for name in (everything if "all" in a.experiment else a.experiment):
-        run(boards, name)
+        failed += [f"{name}: {n}" for n in run(boards, name)]
     for b in boards:  # leave every lens in a known state
         b.pulse("end-wide", A.ZOOM_OUT, WIDE_S)
     print("done; the lenses are left wide (`xm_uart_audit.py restore` zooms the host's board back)", flush=True)
+    if failed:
+        raise SystemExit("failed: " + ", ".join(failed))
 
 
 if __name__ == "__main__":
