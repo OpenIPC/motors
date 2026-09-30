@@ -518,3 +518,90 @@ def test_on_abort_hex_is_validated_by_the_parser():
     with pytest.raises(SystemExit):
         build_parser().parse_args(["inject", "--frame", "c5", "--on-abort", "zz"])
     assert build_parser().parse_args(["inject", "--frame", "c5", "--on-abort", "c501"]).on_abort == b"\xc5\x01"
+
+
+class FailingPort:
+    """A port whose writes fail after the first one, each with a distinct
+    exception instance (kept in .errors); readable fd from a pipe."""
+
+    def __init__(self, ok_writes=1, on_fail=None):
+        self.r, self.w = os.pipe()
+        self.ok_writes = ok_writes
+        self.errors = []
+        self.on_fail = on_fail  # called at the first failure, e.g. to break the log too
+
+    def fileno(self):
+        return self.r
+
+    def read(self, n):
+        return b""
+
+    def write(self, data):
+        if self.ok_writes:
+            self.ok_writes -= 1
+            return len(data)
+        e = OSError(5, f"Input/output error #{len(self.errors) + 1}")
+        self.errors.append(e)
+        if self.on_fail:
+            self.on_fail()
+        raise e
+
+    def close(self):
+        os.close(self.r)
+        os.close(self.w)
+
+
+class FailingLog(io.StringIO):
+    """A capture file that stops accepting writes once .broken is set."""
+
+    broken = False
+
+    def write(self, s):
+        if self.broken:
+            raise OSError(28, "No space left on device")
+        return super().write(s)
+
+
+STOP_FRAME = bytes.fromhex("c50100000000015c")
+FAILING_SCHEDULE = [(0, ZOOM_IN), (1_000_000, ZOOM_IN), (5_000_000_000, STOP_FRAME)]
+
+
+def test_failed_port_propagates_the_run_error_not_the_abort_error():
+    import pytest
+    port = FailingPort()
+    log = io.StringIO()
+    with pytest.raises(OSError) as err:
+        inject.run(port, FAILING_SCHEDULE, LogWriter(log, {}), bridge.Stopper(), on_abort=STOP_FRAME)
+    assert len(port.errors) == 2                      # the scheduled write, then the abort write
+    assert err.value is port.errors[0]                # the run's error, not the abort's
+    assert "on-abort write failed" in log.getvalue()  # cleanup ran and was logged
+    port.close()
+
+
+def test_broken_log_during_cleanup_does_not_mask_the_run_error():
+    import pytest
+    log = FailingLog()
+    writer = LogWriter(log, {})
+
+    def break_log():
+        log.broken = True                             # the capture file fails too, from here on
+
+    port = FailingPort(on_fail=break_log)
+    with pytest.raises(OSError) as err:
+        inject.run(port, FAILING_SCHEDULE, writer, bridge.Stopper(), on_abort=STOP_FRAME)
+    assert err.value is port.errors[0]
+    port.close()
+
+
+def test_failed_abort_after_clean_stop_is_raised():
+    import pytest
+    port = FailingPort(ok_writes=0)                   # every write fails
+    log = FailingLog()
+    writer = LogWriter(log, {})
+    log.broken = True                                 # and so does the log
+    stopper = bridge.Stopper()
+    stopper.stop = True                               # stopped by a signal before any write
+    with pytest.raises(OSError) as err:
+        inject.run(port, [(5_000_000_000, ZOOM_IN)], writer, stopper, on_abort=STOP_FRAME)
+    assert err.value is port.errors[0]                # the abort write's error, not the log's
+    port.close()

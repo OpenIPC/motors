@@ -71,6 +71,7 @@ def run(
                 owed -= 1
             elif b in (0xA5, 0xC5):
                 owed = 7
+    failure: BaseException | None = None
     try:
         while not stopper.stop:
             now = time.monotonic_ns() - t0
@@ -100,16 +101,38 @@ def run(
                     stats.reads[P2C] += 1
                     if on_data:
                         on_data(t, P2C, data)
+    except BaseException as e:
+        failure = e
+        raise
     finally:
+        # Every cleanup step is attempted even if an earlier one fails (the
+        # port, or the capture file, may be what broke the run). Precedence
+        # of what is raised: the error that ended the run, else a failed
+        # abort write, else the first other cleanup failure.
+        cleanup_errors: list[Exception] = []
+
+        def attempt(fn, *args) -> Exception | None:
+            try:
+                fn(*args)
+            except Exception as e:
+                cleanup_errors.append(e)
+                return e
+            return None
+
         if on_abort and i < len(schedule):
             # A partial frame on the wire would swallow the abort frame, so
             # complete it first (with zero bytes, which start nothing).
             pad = bytes(owed)
-            ptz.write(pad + on_abort)
             t = time.monotonic_ns() - t0
-            writer.mark(t, f"stopped with {len(schedule) - i} writes pending; sent on-abort frame"
-                           + (f" after {len(pad)} padding bytes" if pad else ""))
-            writer.data(t, C2P, pad + on_abort)
-        sel.close()
-        writer.flush()
+            err = attempt(ptz.write, pad + on_abort)
+            if err is None:
+                attempt(writer.mark, t, f"stopped with {len(schedule) - i} writes pending; "
+                        "sent on-abort frame" + (f" after {len(pad)} padding bytes" if pad else ""))
+                attempt(writer.data, t, C2P, pad + on_abort)
+            else:
+                attempt(writer.mark, t, f"on-abort write failed: {err}")
+        attempt(sel.close)
+        attempt(writer.flush)
+        if failure is None and cleanup_errors:
+            raise cleanup_errors[0]
     return stats
