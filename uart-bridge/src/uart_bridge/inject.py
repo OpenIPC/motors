@@ -47,8 +47,13 @@ def run(
     stopper: Stopper,
     on_data: Callable[[int, str, bytes], None] | None = None,
     tail: float = 0.5,
+    on_abort: bytes = b"",
 ) -> Stats:
-    """Send `schedule`, then keep listening for `tail` seconds."""
+    """Send `schedule`, then keep listening for `tail` seconds.
+
+    If stopped (SIGINT/SIGTERM) before the whole schedule went out, write
+    `on_abort` before returning: a replayed move whose stop frame was still
+    pending would otherwise keep the motor running."""
     stats = Stats()
     sel = selectors.DefaultSelector()
     sel.register(ptz.fileno(), selectors.EVENT_READ)
@@ -84,6 +89,11 @@ def run(
                     if on_data:
                         on_data(t, P2C, data)
     finally:
+        if on_abort and i < len(schedule):
+            ptz.write(on_abort)
+            t = time.monotonic_ns() - t0
+            writer.mark(t, f"stopped with {len(schedule) - i} writes pending; sent on-abort frame")
+            writer.data(t, C2P, on_abort)
         sel.close()
         writer.flush()
     return stats

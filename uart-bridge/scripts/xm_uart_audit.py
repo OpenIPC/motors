@@ -39,6 +39,7 @@ UV = "uv"
 HERE = Path(__file__).resolve().parent.parent  # uart-bridge/
 CAPTURES = HERE / "captures"
 STOP = "c50100000000015c"
+REPORT_S = 0.3  # a zoom pulse this long always yields a report (they come every ~225 ms)
 
 
 def frame(c1=0, c2=0, d1=0, d2=0, sync=0xC5, addr=1, ck=None, trailer=b"\x5c") -> str:
@@ -68,8 +69,10 @@ def inject(name: str, records: list[tuple[float, str]], tail: float = 1.2) -> li
         for t, x in records:
             f.write(json.dumps({"t": int(t * 1e9), "d": "c2p", "x": x}) + "\n")
     out.unlink(missing_ok=True)
+    # --on-abort: if this run is interrupted before its stop frame is due,
+    # inject still sends one, so no motor is left running.
     uart_bridge("inject", "--replay", str(src), "--tail", str(tail), "--quiet", "--log", str(out),
-                capture_output=True, check=True)
+                "--on-abort", STOP, capture_output=True, check=True)
     return zooms(out)
 
 
@@ -292,12 +295,16 @@ def resync_camera_osd() -> list[float]:
         for cmd in (ZOOM_IN, ZOOM_OUT):
             time.sleep(1.0)
             br.send("!" + cmd)
-            time.sleep(0.12)
+            time.sleep(REPORT_S)  # long enough that the board reports it
             br.send("!" + STOP)
         time.sleep(1.5)
     finally:
         br.close()
     return zooms(br.log)
+
+
+class CaptureError(Exception):
+    pass
 
 
 def gray_frames(a, n: int = 2) -> tuple[int, int, list[bytes]]:
@@ -306,12 +313,18 @@ def gray_frames(a, n: int = 2) -> tuple[int, int, list[bytes]]:
            "&channel=1&stream=0.sdp?real_stream")
     probe = subprocess.run(["ffprobe", "-v", "error", "-rtsp_transport", "tcp", "-select_streams", "v:0",
                             "-show_entries", "stream=width,height", "-of", "csv=p=0", url],
-                           capture_output=True, text=True, timeout=30).stdout.split(",")
-    w, h = int(probe[0]), int(probe[1])
-    raw = subprocess.run(["ffmpeg", "-loglevel", "error", "-rtsp_transport", "tcp", "-i", url,
+                           capture_output=True, text=True, timeout=30)
+    try:
+        w, h = (int(v) for v in probe.stdout.strip().split(",")[:2])
+    except ValueError:
+        raise CaptureError(f"ffprobe gave no frame size (exit {probe.returncode}): {probe.stderr.strip()}")
+    cap = subprocess.run(["ffmpeg", "-loglevel", "error", "-rtsp_transport", "tcp", "-i", url,
                           "-frames:v", str(n), "-f", "rawvideo", "-pix_fmt", "gray", "-"],
-                         capture_output=True, timeout=30).stdout
-    return w, h, [raw[i * w * h:(i + 1) * w * h] for i in range(len(raw) // (w * h))]
+                         capture_output=True, timeout=30)
+    if cap.returncode != 0 or len(cap.stdout) < n * w * h:
+        raise CaptureError(f"ffmpeg returned {len(cap.stdout) // (w * h)} of {n} frames "
+                           f"(exit {cap.returncode}): {cap.stderr.decode(errors='replace').strip()}")
+    return w, h, [cap.stdout[i * w * h:(i + 1) * w * h] for i in range(n)]
 
 
 def tenengrad(frame: bytes, w: int, x: int, y: int, r: int) -> float:
@@ -326,16 +339,24 @@ def tenengrad(frame: bytes, w: int, x: int, y: int, r: int) -> float:
     return total / (2 * r - 2) ** 2
 
 
-def peak_position(values: list[float]) -> float:
-    """Centroid of the part of a sharpness curve above 80% of its maximum."""
+def peak_position(values: list[float]) -> float | None:
+    """Centroid of the part of a sharpness curve above 80% of its maximum;
+    None for a flat curve (no texture, blank or covered target)."""
     top = max(values)
+    if top <= 0 or top - min(values) < 0.05 * top:
+        return None
     pts = [(i + 1, v / top - 0.8) for i, v in enumerate(values) if v / top >= 0.8]
     return sum(i * wgt for i, wgt in pts) / sum(wgt for _, wgt in pts)
 
 
 def parse_target(text: str) -> tuple[str, tuple[int, int, int]]:
-    name, xyr = text.split("=")
-    x, y, r = (int(v) for v in xyr.split(","))
+    try:
+        name, xyr = text.split("=")
+        x, y, r = (int(v) for v in xyr.split(","))
+    except ValueError:
+        raise SystemExit(f"target {text!r}: expected NAME=X,Y,R")
+    if r < 3:
+        raise SystemExit(f"target {name}: radius {r} too small, need >= 3")
     return name, (x, y, r)
 
 
@@ -348,6 +369,15 @@ def cmd_focusdir(a) -> None:
     near = dict(parse_target(t) for t in a.near)
     far = dict(parse_target(t) for t in a.far)
     targets = {**near, **far}
+    # Pre-flight, before the lens moves: the camera delivers frames and every
+    # target box fits inside them.
+    try:
+        w, h, _ = gray_frames(a, 1)
+    except CaptureError as e:
+        raise SystemExit(f"camera capture failed: {e}")
+    for k, (x, y, r) in targets.items():
+        if not (r <= x < w - r and r <= y < h - r):
+            raise SystemExit(f"target {k} ({x},{y}) r={r} does not fit a {w}x{h} frame")
     bit80, bit01 = frame(c2=0x80), frame(c1=0x01)
     pulse("focusdir-away", bit01, hold=a.away)
     time.sleep(0.3)
@@ -359,17 +389,26 @@ def cmd_focusdir(a) -> None:
         for _ in range(a.steps):
             pulse("focusdir-step", move, hold=a.step)
             time.sleep(0.3)
-            w, _, frames = gray_frames(a)
+            try:
+                w, _, frames = gray_frames(a)
+            except CaptureError as e:
+                raise SystemExit(f"camera capture failed mid-sweep ({e}); focus is off, "
+                                 "run `refocus` once the camera is back")
             for k, (x, y, r) in targets.items():
                 curves[k].append(sum(tenengrad(f, w, x, y, r) for f in frames) / len(frames))
         peaks = {k: peak_position(v) for k, v in curves.items()}
+        flat = [k for k, v in peaks.items() if v is None]
+        if flat:
+            print(f"sweep {name}: inconclusive, no sharpness change on {', '.join(flat)}", flush=True)
+            verdicts.append(None)
+            continue
         offset = (sum(peaks[k] for k in near) / len(near)) - (sum(peaks[k] for k in far) / len(far))
         print(f"sweep {name}: " + "  ".join(f"{k}={v:.2f}" for k, v in peaks.items())
               + f"  near-far={offset:+.2f} steps", flush=True)
         # near peaking later means this sweep moves focus nearer
         verdicts.append(("0x80" if move == bit80 else "0x01") if offset > 0 else
                         ("0x01" if move == bit80 else "0x80"))
-    if len(set(verdicts)) == 1:
+    if None not in verdicts and len(set(verdicts)) == 1:
         bit = verdicts[0]
         print(f"focus NEARER = {'cmd2 0x80' if bit == '0x80' else 'cmd1 0x01'} (all three sweeps agree)")
     else:
@@ -378,31 +417,44 @@ def cmd_focusdir(a) -> None:
 
 
 def cmd_restore(a) -> None:
-    # Reports come every ~225 ms while zooming, so the probe must be longer.
-    z = pulse("restore-probe", ZOOM_IN, hold=0.3)
-    last = None
+    """Zoom to --zoom using the board's own reports. Exits non-zero if the
+    target cannot be reached (end stop) or the board stops answering."""
+
+    def confirm_silence(i, cmd, last):
+        # A short pulse can end without a report, so silence is only an end
+        # stop once a report-length pulse is silent too and the board still
+        # answers in the other direction.
+        z = pulse(f"restore-{i}-confirm", cmd, hold=REPORT_S)
+        if z:
+            return z
+        other = ZOOM_IN if cmd == ZOOM_OUT else ZOOM_OUT
+        if pulse(f"restore-{i}-other", other, hold=REPORT_S):
+            pulse(f"restore-{i}-back", cmd, hold=REPORT_S + 0.2)  # undo, and a bit more
+            end = "wide" if cmd == ZOOM_OUT else "tele"
+            raise SystemExit(f"zoom {end} end stop reached near X{last}; X{a.zoom} is out of range")
+        raise SystemExit("the board stopped sending zoom reports in both directions")
+
+    z = pulse("restore-probe", ZOOM_IN, hold=REPORT_S)
+    if not z:
+        z = confirm_silence("probe", ZOOM_IN, "?")
     for i in range(40):
-        if not z:
-            # The board is silent when a zoom pulse cannot move: the lens is
-            # at an end stop (X5.0 at tele on the 85H50AI).
-            if last is None:
-                raise SystemExit("no zoom reports from the board")
-            print(f"at the zoom end stop near X{last}; target X{a.zoom} is out of range")
-            return
-        now = last = z[-1]
+        now = z[-1]
         if abs(now - a.zoom) < 0.05:
             # Only done once the camera has seen a report on target: the
             # resync nudge moves the lens too, so measure what it left.
             z = resync_camera_osd()
-            if z and abs(z[-1] - a.zoom) < 0.05:
+            if not z:
+                raise SystemExit("no zoom reports during the camera OSD resync")
+            if abs(z[-1] - a.zoom) < 0.05:
                 print("zoom", z[-1], "(camera OSD in sync)")
                 return
-            print("resync left zoom at", z[-1] if z else "?", "- correcting")
+            print("resync left zoom at", z[-1], "- correcting")
             continue
-        wide = now > a.zoom
-        z = pulse(f"restore-{i}", ZOOM_OUT if wide else ZOOM_IN,
-                  hold=min(0.4, 0.1 + abs(now - a.zoom) / 4))
-    print("gave up at", z[-1] if z else "?")
+        cmd = ZOOM_OUT if now > a.zoom else ZOOM_IN
+        z = pulse(f"restore-{i}", cmd, hold=min(0.4, 0.1 + abs(now - a.zoom) / 4))
+        if not z:
+            z = confirm_silence(i, cmd, now)
+    raise SystemExit(f"gave up at X{z[-1]}")
 
 
 def main() -> None:

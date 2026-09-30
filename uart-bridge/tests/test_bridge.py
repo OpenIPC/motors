@@ -476,3 +476,20 @@ def test_pty_write_gives_up_when_nobody_reads():
     n = cam.write(b"\xef" * 1_000_000)
     assert n < 1_000_000 and time.monotonic() - t < 0.5
     cam.close()
+
+
+def test_inject_sends_on_abort_when_stopped_early():
+    ptz_m, ptz_path, ptz_s = pty_port()
+    ptz = bridge.open_port(ptz_path, 115200)
+    stop = bytes.fromhex("c50100000000015c")
+    stopper = bridge.Stopper()
+    sched = [(0, ZOOM_IN), (5_000_000_000, stop)]      # stop due in 5 s
+    th = threading.Thread(target=inject.run, args=(ptz, sched, LogWriter(io.StringIO(), {}), stopper),
+                          kwargs={"on_abort": stop})
+    th.start()
+    assert read_exact(ptz_m, 8) == ZOOM_IN
+    stopper.stop = True                                # interrupted before the stop was due
+    th.join(2)
+    assert read_exact(ptz_m, 8, timeout=0.5) == stop
+    os.close(ptz_m)
+    os.close(ptz_s)
