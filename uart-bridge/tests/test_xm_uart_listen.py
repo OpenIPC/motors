@@ -147,3 +147,35 @@ def test_client_from_another_address_is_refused(xm_uart):
         assert read_board(board, 8, timeout=0.3) == b""
     finally:
         stop_relay(board, slave, proc)
+
+
+def test_truncated_frame_then_valid_frame(relay):
+    board, port, _ = relay
+    s = connect(port)
+    s.sendall(ZOOM_IN[:5])                           # sender dies mid-frame...
+    time.sleep(0.05)                                 # ...and a new one starts well inside 300 ms
+    s.sendall(STOP)
+    assert read_board(board, 16, timeout=0.5) == STOP
+    s.close()
+
+
+def test_spliced_frame_in_one_send_is_rejected(relay):
+    board, port, _ = relay
+    s = connect(port)
+    s.sendall(ZOOM_IN[:5] + STOP)                    # c5 01 00 20 00 c5 01 00 | 00 00 01 5c
+    assert read_board(board, 16, timeout=0.5) == STOP  # resynced on the second C5
+    s.close()
+
+
+def test_flood_reaches_the_board_as_whole_frames_only(relay):
+    board, port, _ = relay
+    s = connect(port)
+    s.sendall((ZOOM_IN + A5) * 500)                  # far more than the pty will buffer unread
+    time.sleep(0.5)
+    got = read_board(board, 200_000, timeout=1.5)
+    s.close()
+    got += read_board(board, 64, timeout=0.3)        # the disconnect's stop
+    assert got and len(got) % 8 == 0
+    for i in range(0, len(got), 8):
+        f = got[i:i + 8]
+        assert f in (ZOOM_IN, A5, STOP), f"not a whole frame at {i}: {f.hex(' ')}"

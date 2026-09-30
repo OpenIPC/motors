@@ -538,7 +538,8 @@ def cmd_focusoffset(a) -> None:
     if best in (0, len(curve) - 1):
         raise SystemExit(f"no peak inside the sweep: sharpest at its {'start' if best == 0 else 'end'} "
                          f"({curve[best]:.1f}); widen --away/--steps")
-    print(f"sharpest at step {peak:.2f}; tracked focus offset {0.1 * peak - a.away:+.2f} s of drive "
+    # step k sits at -away + 0.15 (take-up) + 0.1 k from where tracking had focus
+    print(f"sharpest at step {peak:.2f}; tracked focus offset {0.1 * peak + 0.15 - a.away:+.2f} s of drive "
           f"(positive: the sharpest point is nearer)")
 
 

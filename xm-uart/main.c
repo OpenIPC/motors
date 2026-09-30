@@ -18,7 +18,6 @@
 #include <string.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
-#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <termios.h>
@@ -51,42 +50,62 @@ static void on_signal(int sig) {
 }
 
 /* The board parses a fixed 8-byte frame from any C5 or A5 byte and has no
- * inter-byte timeout: a short write would make it swallow the next command.
- * So every frame goes out whole. */
+ * inter-byte timeout: half a frame left on its wire swallows the next
+ * command. So nothing is written directly: frames go through a queue that
+ * only ever holds whole frames, plus the unsent rest of the one frame the
+ * UART has started, and is drained without blocking. */
 static long long now_ms(void);
 
-/* Bounded: gives up (-1, EAGAIN) after 2 s so a stuck UART cannot hang the
- * loop that has to send the stop frames. */
-static int write_all(int fd, const uint8_t *buf, size_t len) {
-  long long deadline = now_ms() + 2000;
-  while (len) {
-    if (now_ms() > deadline) {
-      errno = EAGAIN;
-      return -1;
-    }
-    ssize_t n = write(fd, buf, len);
-    if (n < 0) {
-      if (errno == EINTR)
+#define FRAME 8
+static uint8_t txq[4096];
+static size_t txlen; /* txlen % FRAME = unsent rest of a frame already started */
+
+static void uart_flush(void) {
+  while (txlen) {
+    ssize_t n = write(uart, txq, txlen);
+    if (n <= 0) {
+      if (n < 0 && errno == EINTR)
         continue;
-      if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        struct pollfd p = {.fd = fd, .events = POLLOUT};
-        poll(&p, 1, 100);
-        continue;
-      }
-      return -1;
+      return; /* EAGAIN: POLLOUT in the main loop brings us back */
     }
-    buf += n;
-    len -= (size_t)n;
+    memmove(txq, txq + n, txlen - (size_t)n);
+    txlen -= (size_t)n;
   }
-  return 0;
+}
+
+/* Queue one whole frame. A normal frame is dropped (false) when there is no
+ * room; a stop frame instead discards the queued frames that have not
+ * started, keeping only the rest of the frame in progress, so it always
+ * goes out right after it. */
+static bool uart_send(const uint8_t *f, bool is_stop) {
+  if (is_stop)
+    txlen %= FRAME;
+  else if (txlen + FRAME > sizeof(txq))
+    return false;
+  memcpy(txq + txlen, f, FRAME);
+  txlen += FRAME;
+  uart_flush();
+  return true;
+}
+
+/* At exit: give the queue up to 2 s to drain, then let the kernel finish. */
+static void uart_drain(void) {
+  long long deadline = now_ms() + 2000;
+  while (txlen && now_ms() < deadline) {
+    struct pollfd p = {.fd = uart, .events = POLLOUT};
+    poll(&p, 1, 50);
+    uart_flush();
+  }
+  tcdrain(uart);
 }
 
 static void send_frame(uint8_t cmd1, uint8_t cmd2, uint8_t data1,
                        uint8_t data2) {
   uint8_t f[8] = {SYNC, ADDRESS, cmd1, cmd2, data1, data2, 0, TRAILER};
   f[6] = (uint8_t)(f[1] + f[2] + f[3] + f[4] + f[5]); /* sum % 256 */
-  if (write_all(uart, f, sizeof(f)) < 0)
-    fprintf(stderr, "write: %s\n", strerror(errno));
+  bool is_stop = !cmd1 && !cmd2 && !data1 && !data2;
+  if (!uart_send(f, is_stop))
+    fprintf(stderr, "UART queue full, frame dropped\n");
 }
 
 /* pan/tilt/zoom in -100..100 (sign = direction); speed scaled to 0..0x3f */
@@ -134,24 +153,41 @@ static long long now_ms(void) {
  * inter-byte timeout and a partial one would swallow the next command. */
 static void net_expire(void);
 
-/* Bytes the UART has yet to send; a network frame is written only when it
- * fits whole, so a client outpacing 115200 baud loses whole frames, never
- * leaves half a one on the board's wire, and never blocks this loop. */
-#define UART_QUEUE_LIMIT 2048
-
 static void net_write_frame(void) {
-  int queued = 0;
-  if (ioctl(uart, TIOCOUTQ, &queued) == 0 && queued > UART_QUEUE_LIMIT) {
-    net_dropped += sizeof(net_frame);
-    return;
-  }
-  if (write_all(uart, net_frame, sizeof(net_frame)) < 0)
-    fprintf(stderr, "write: %s\n", strerror(errno));
-  net_frames++;
+  static const uint8_t stop[FRAME] = {SYNC, ADDRESS, 0, 0, 0, 0, ADDRESS, TRAILER};
+  bool is_stop = !memcmp(net_frame, stop, 2) && !memcmp(net_frame + 2, stop + 2, 4);
+  if (uart_send(net_frame, is_stop))
+    net_frames++;
+  else
+    net_dropped += FRAME; /* client outpaces the UART: lose whole frames only */
 }
+
+/* Resynchronise inside a rejected candidate: drop its first byte and carry
+ * on from the next sync byte in it, if any. */
+static void net_resync(void) {
+  size_t i = 1;
+  while (i < net_len && net_frame[i] != 0xa5 && net_frame[i] != SYNC)
+    i++;
+  net_dropped += i;
+  memmove(net_frame, net_frame + i, net_len - i);
+  net_len -= i;
+  if (net_len)
+    net_started_ms = now_ms();
+}
+
+#define TRUNCATED_GAP_MS 20
 
 static void net_feed(const uint8_t *data, size_t len) {
   net_expire(); /* a late tail must not complete a frame that already timed out */
+  /* Senders write whole frames in one go. A partial frame still waiting
+   * when a new batch starts with a sync byte was truncated: drop it rather
+   * than splice the new command into it. */
+  if (net_len && len && (data[0] == 0xa5 || data[0] == SYNC) &&
+      now_ms() - net_started_ms > TRUNCATED_GAP_MS) {
+    printf("Discarded a truncated %zu-byte frame from the network\n", net_len);
+    net_dropped += net_len;
+    net_len = 0;
+  }
   for (size_t i = 0; i < len; i++) {
     uint8_t b = data[i];
     if (net_len == 0) {
@@ -162,7 +198,13 @@ static void net_feed(const uint8_t *data, size_t len) {
       net_started_ms = now_ms();
     }
     net_frame[net_len++] = b;
-    if (net_len == sizeof(net_frame)) {
+    while (net_len == FRAME) {
+      /* A C5 command carries its own end byte: one without it is a splice
+       * of two frames, never a command. (A5 frames have no such check.) */
+      if (net_frame[0] == SYNC && net_frame[FRAME - 1] != TRAILER) {
+        net_resync();
+        continue;
+      }
       net_write_frame();
       net_len = 0;
     }
@@ -436,7 +478,7 @@ int main(int argc, char *argv[]) {
   while (!quit) {
     struct pollfd pfds[4] = {
         {.fd = stdin_open ? STDIN_FILENO : -1, .events = POLLIN},
-        {.fd = uart, .events = POLLIN},
+        {.fd = uart, .events = (short)(POLLIN | (txlen ? POLLOUT : 0))},
         {.fd = listen_fd, .events = POLLIN},
         {.fd = client_fd, .events = POLLIN},
     };
@@ -513,6 +555,8 @@ int main(int argc, char *argv[]) {
       }
     }
 
+    if (pfds[1].revents & POLLOUT)
+      uart_flush();
     if (pfds[1].revents & POLLIN) {
       uint8_t rbuf[256];
       ssize_t n = read(uart, rbuf, sizeof(rbuf));
@@ -560,7 +604,7 @@ int main(int argc, char *argv[]) {
     close(client_fd);
   if (listen_fd >= 0)
     close(listen_fd);
-  tcdrain(uart);
+  uart_drain();
   close(uart);
   return 0;
 }

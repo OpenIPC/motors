@@ -92,6 +92,7 @@ This measures how far each board's tracked focus is from that camera's sharpest 
 
 ## Pitfalls (all hit in the lab)
 - **Two readers on the lens tty.** See step 1.
+- **Unequal starting focus.** An XM board refocuses by itself after every zoom, from its tracking; the reference camera's traffic adds nothing to that, so replaying the `A5` stream or not makes no difference. A focus offset present at the start is carried through every zoom move, so two lenses that start differently stay different.
 - **Stale lens state.** Compare only after both boards have re-homed. Earlier autofocus runs, or sweeps, leave focus offsets that tracking preserves through every zoom move.
 - **Relay in `/tmp`.** It's gone after the power cycle that re-homing needs. Install it into the overlay.
 - **Different scenes.** Absolute sharpness numbers aren't comparable between cameras. Compare trends and the positions of peaks, not values.
