@@ -97,6 +97,9 @@ results are in `xm-uart/PROTOCOL.md`, "Zoom tracking inside the board".
 same DVRIP PTZ commands through python-dvr, in lockstep. At each zoom level it
 compares the zoom reached, when each picture stopped changing, how sharp it
 settled (with `--reference`, against each camera's own best focus), and when
-majestic-af's after-zoom pass finished. It also checks that a manual focus nudge
-is not followed by an autofocus pass. The OpenIPC camera needs majestic with
+majestic-af's after-zoom pass finished. It also records where each lens board's own
+tracking left focus 1.5–2.8 s after the stop, before majestic-af's pass starts. The
+default levels zoom in from the wide stop; `--levels out-X4.0 … out-X1.0` zoom out
+from the tele end instead. It also checks that a manual focus nudge is not followed
+by an autofocus pass. The OpenIPC camera needs majestic with
 DVRIP PTZ (netip `OPPTZControl`); see TWIN.md, "Driving both cameras over DVRIP".

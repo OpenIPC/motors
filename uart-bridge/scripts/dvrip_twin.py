@@ -13,7 +13,8 @@ zoom comes from the board's own reports), from the uart-bridge directory:
     uv run scripts/dvrip_twin.py --stock 10.0.0.5 --openipc 10.0.0.6 \\
         --openipc-http root:PASS [--reference]
 
-Per zoom level, from the wide stop: zoom in with one held DVRIP move, record
+Per zoom level (X1.0 to X5.0), one held DVRIP zoom that reaches it, recorded:
+X2.0-X5.0 zoom in from the wide stop, X1.0 zooms out into it from X2.0. Record
 both cameras' video until well after any autofocus has finished, then compare
 the zoom reached, how sharp each settled and when. A manual focus nudge ends the
 run: OpenIPC must not refocus after it. --reference adds a focus sweep per
@@ -55,6 +56,41 @@ import xm_uart_audit as A  # noqa: E402
 ZOOM_TOLERANCE = 0.2
 OBSERVE_S = 30.0  # video per level: the board's ~10 s settle, then majestic-af's pass
 QUIET_S = 12.0    # after the zoom-out, before the next zoom-in
+
+# Each level is the moves that reach it from anywhere, the last one recorded. A
+# zoom-in level: into the wide stop, then zoom in for the measured hold. X1.0 is
+# the wide stop itself, so it is reached the way a zoom-out reaches it: settled
+# at X2.0 first, then one zoom-out into the stop.
+WIDE_LEVEL = "X1.0"
+IN_LEVELS = {WIDE_LEVEL: None, **T.LEVELS}
+# Zoom-out levels: settled at the tele end (X5.0) first, then one zoom-out held for the full
+# range less the level's zoom-in hold. A zoom-out drives focus the other way through the board's
+# tracking, so it can land differently from a zoom-in to the same ratio. out-X1.0 goes into the
+# wide stop.
+FULL_S = 5.6   # the whole zoom range, wide stop to tele end
+OUT_LEVELS = {f"out-{lv}": round(FULL_S - hold, 1) for lv, hold in T.LEVELS.items() if lv != "X5.0"}
+OUT_LEVELS["out-X1.5"] = 4.8
+OUT_LEVELS["out-X1.0"] = T.WIDE_S
+LEVELS = {**IN_LEVELS, **OUT_LEVELS}
+
+
+def moves(level: str) -> list[tuple[str, float]]:
+    if level == WIDE_LEVEL:
+        return [("ZoomWide", T.WIDE_S), ("ZoomTile", T.LEVELS["X2.0"]), ("ZoomWide", T.WIDE_S)]
+    if level in OUT_LEVELS:
+        return [("ZoomWide", T.WIDE_S), ("ZoomTile", T.LEVELS["X5.0"]), ("ZoomWide", OUT_LEVELS[level])]
+    return [("ZoomWide", T.WIDE_S), ("ZoomTile", T.LEVELS[level])]
+
+
+BOARD_ONLY_S = (1.5, 2.8)   # after the stop, before majestic-af's pass starts (zoom_settle_ms, 3 s)
+
+
+def board_only(tl: list[tuple[float, float]], stop_at: float) -> float | None:
+    """Median sharpness in BOARD_ONLY_S after the stop: where the lens board's own tracking left
+    focus, before any camera-side autofocus moved it."""
+    lo, hi = BOARD_ONLY_S
+    xs = [s for t, s in tl if stop_at + lo <= t <= stop_at + hi]
+    return round(statistics.median(xs), 1) if xs else None
 
 
 class Camera:
@@ -142,14 +178,16 @@ def wait_af(cam: Camera, before: str | None, t_stop: float, limit: float) -> tup
     return cam.af_status(), None
 
 
-def level_run(cam: Camera, level: str, hold: float, gate: threading.Barrier, stamp: str) -> dict:
-    """Wide stop, then one held zoom-in to `level`, recorded."""
-    cam.dvrip.mark(f"{level}: to the wide stop")
+def level_run(cam: Camera, level: str, gate: threading.Barrier, stamp: str) -> dict:
+    """Reach `level` (see moves), recording the last move on both cameras."""
+    *prep, (cmd, hold) = moves(level)
     gate.wait()
-    cam.dvrip.step("ZoomWide", hold=T.WIDE_S, settle=0)
-    t_wide = time.monotonic()
-    wait_af(cam, cam.af_status(), t_wide, 40)  # majestic-af books a pass after a zoom-out too
-    time.sleep(max(0.0, t_wide + QUIET_S - time.monotonic()))
+    for pcmd, phold in prep:
+        cam.dvrip.mark(f"{level}: {pcmd} {phold} s")
+        cam.dvrip.step(pcmd, hold=phold, settle=0)
+        t = time.monotonic()
+        wait_af(cam, cam.af_status(), t, 40)   # majestic-af books a pass after any zoom
+        time.sleep(max(0.0, t + QUIET_S - time.monotonic()))
     before = cam.af_status()
     out = A.CAPTURES / f"dvrip-twin-{stamp}-{cam.name}-{level}.mkv"
     rec = T.Recording(cam.rtsp, out, OBSERVE_S, cam.name)
@@ -160,8 +198,8 @@ def level_run(cam: Camera, level: str, hold: float, gate: threading.Barrier, sta
         gate.wait()
         time.sleep(max(0.0, rec.t0 + 2.0 - time.monotonic()))
         cmd_at = rec.elapsed()
-        cam.dvrip.mark(f"{level}: zoom in {hold} s")
-        cam.dvrip.step("ZoomTile", hold=hold, settle=0)
+        cam.dvrip.mark(f"{level}: {cmd} {hold} s, recorded")
+        cam.dvrip.step(cmd, hold=hold, settle=0)
         stop_at, t_stop = rec.elapsed(), time.monotonic()
         # Only as long as the recording still runs: a pass that finishes after
         # the video ends has no settled picture to show for it.
@@ -173,6 +211,7 @@ def level_run(cam: Camera, level: str, hold: float, gate: threading.Barrier, sta
     # sweep's best is in; the timeline (smaller, for timing) is not comparable.
     return {"cmd_at": cmd_at, "stop_at": stop_at, "zoom": cam.zoom(), "af": af, "af_done_s": af_s,
             "settled": settled(tl), "settle_s": settle_time(tl, stop_at), "final_sharp": cam.sharpness(),
+            "board_only": board_only(tl, stop_at),
             "video": out.name, "sharp": tl}
 
 
@@ -207,22 +246,53 @@ def manual_focus_run(cam: Camera, gate: threading.Barrier) -> dict:
             "moved": bool(s0) and abs(s1 - s0) >= NUDGE_MIN_CHANGE * s0}
 
 
-def reference_stock(cam: StockCamera, levels: dict) -> dict:
+REF_NUDGE_S = 0.1   # a reference that stopped short of the run's zoom goes on by this much
+REF_NUDGES = 4
+
+
+def reference_stock(cam: StockCamera, levels, targets: dict | None = None) -> dict:
     """Best focus per level on the host's own board: zoom by inject, then a
-    focus sweep (xm_tracking's offset experiment). The bridge must be closed."""
+    focus sweep (xm_tracking's offset experiment). The bridge must be closed.
+
+    `targets` is the zoom the run reached at each level. Timed pulses on the wire
+    move the stock lens less than the run's DVRIP holds, which it holds
+    0.10-0.15 s longer (see ZOOM_TOLERANCE): a reference that stopped short goes
+    on the same way in short pulses until the board reports the run's zoom, so
+    it still approaches from the same side."""
     board = T.Board(cam.name, "-", cam.rtsp, cam.roi)
-    return {lv: {"reached": board.to_level(hold), **board.focus_offset()} for lv, hold in levels.items()}
+    out = {}
+    for lv in levels:
+        reports = []
+        mv = moves(lv)
+        for cmd, hold in mv:
+            reports = board.pulse("ref", A.ZOOM_OUT if cmd == "ZoomWide" else A.ZOOM_IN, hold) or reports
+            time.sleep(1.5)
+        last, target = mv[-1][0], (targets or {}).get(lv)
+        for _ in range(REF_NUDGES):
+            z = reports[-1] if reports else None
+            if target is None or z is None:
+                break
+            short = z - target > 0.05 if last == "ZoomWide" else target - z > 0.05
+            if not short:
+                break
+            reports = board.pulse("ref", A.ZOOM_OUT if last == "ZoomWide" else A.ZOOM_IN, REF_NUDGE_S) or reports
+            time.sleep(1.5)
+        time.sleep(T.SETTLE_S)
+        out[lv] = {"reached": reports[-1] if reports else None, **board.focus_offset()}
+    return out
 
 
 def reference_openipc(cam: OpenIpcCamera, levels: dict) -> dict:
     """Best focus per level through majestic: zoom over DVRIP, then a sweep
     of 100 ms focus steps through /ptz, which the plugin times exactly."""
     out = {}
-    for lv, hold in levels.items():
-        cam.dvrip.step("ZoomWide", hold=T.WIDE_S, settle=0)
-        wait_af(cam, cam.af_status(), time.monotonic(), 40)
+    for lv in levels:
+        *prep, (cmd, hold) = moves(lv)
+        for pcmd, phold in prep:
+            cam.dvrip.step(pcmd, hold=phold, settle=0)
+            wait_af(cam, cam.af_status(), time.monotonic(), 40)
         before = cam.af_status()
-        cam.dvrip.step("ZoomTile", hold=hold, settle=0)
+        cam.dvrip.step(cmd, hold=hold, settle=0)
         # majestic-af's own pass first: a sweep that overlapped it would record
         # the pass's moves as well as its own.
         af, af_s = wait_af(cam, before, time.monotonic(), 40)
@@ -332,16 +402,16 @@ def verdict(report: dict, names: tuple[str, str]) -> tuple[list[str], list[str]]
 
 def table(report: dict, names: tuple[str, str]) -> str:
     stock, oip = names
-    rows = [f"{'level':6s} {'zoom ' + stock:>12s} {'zoom ' + oip:>12s} "
+    rows = [f"{'level':8s} {'zoom ' + stock:>12s} {'zoom ' + oip:>12s} "
             f"{stock + ' %best':>13s} {oip + ' %best':>13s} {stock + ' settle':>13s} "
-            f"{oip + ' settle':>13s} {oip + ' AF':>10s}"]
+            f"{oip + ' settle':>13s} {oip + ' AF':>10s} {'at +2s: ' + stock:>15s} {oip:>8s}"]
     for lv, r in report["levels"].items():
         a, b = r.get(stock, {}), r.get(oip, {})
-        pct = lambda x: f"{x['of_best']:.0%}" if x.get("of_best") is not None else "-"
+        pct = lambda x, k="of_best": f"{x[k]:.0%}" if x.get(k) is not None else "-"
         sec = lambda v: f"{v}s" if v is not None else "-"
-        rows.append(f"{lv:6s} {str(a.get('zoom')):>12s} {str(b.get('zoom')):>12s} {pct(a):>13s} "
+        rows.append(f"{lv:8s} {str(a.get('zoom')):>12s} {str(b.get('zoom')):>12s} {pct(a):>13s} "
                     f"{pct(b):>13s} {sec(a.get('settle_s')):>13s} {sec(b.get('settle_s')):>13s} "
-                    f"{sec(b.get('af_done_s')):>10s}")
+                    f"{sec(b.get('af_done_s')):>10s} {pct(a, 'board_of_best'):>15s} {pct(b, 'board_of_best'):>8s}")
     return "\n".join(rows)
 
 
@@ -359,14 +429,16 @@ def main() -> None:
     p.add_argument("--stock-roi", type=A.parse_roi, metavar="X,Y,R",
                    help="where to measure sharpness, as fractions of the frame (default: the centre)")
     p.add_argument("--openipc-roi", type=A.parse_roi, metavar="X,Y,R")
-    p.add_argument("--levels", nargs="+", default=list(T.LEVELS), choices=list(T.LEVELS))
+    p.add_argument("--levels", nargs="+", default=list(IN_LEVELS), choices=list(LEVELS),
+                   help="default: the zoom-in levels; the out-X* levels zoom out from X5.0")
     p.add_argument("--reference", action="store_true", help="also sweep focus per level for each camera's best")
     p.add_argument("--no-bridge", action="store_true",
                    help="this host is not wired to the stock board: no stock zoom or reference")
     p.add_argument("--python-dvr", default="~/git/python-dvr")
     a = p.parse_args()
 
-    levels = {lv: T.LEVELS[lv] for lv in a.levels}
+    # In the order asked for; a level named twice runs once (the report is keyed by level).
+    levels = list(dict.fromkeys(a.levels))
     names = ("stock", "openipc")
     stock_rtsp = a.stock_rtsp or A.rtsp_url(argparse.Namespace(rtsp=None, camera=a.stock, user=a.stock_user,
                                                                 password=a.stock_password))
@@ -386,9 +458,9 @@ def main() -> None:
                             a.stock_roi),
                 OpenIpcCamera(names[1], dv(a.openipc, a.openipc_user, a.openipc_password, None), oip_rtsp,
                               a.openipc, a.openipc_http, a.openipc_roi)]
-        for lv, hold in levels.items():
+        for lv in levels:
             gate = threading.Barrier(len(cams), timeout=180)
-            report["levels"][lv] = in_parallel(cams, level_run, lv, hold, gate, stamp)
+            report["levels"][lv] = in_parallel(cams, level_run, lv, gate, stamp)
             r = report["levels"][lv]
             if any("error" in r.get(n, {}) for n in names):
                 # A camera that failed is in an unknown state: move no lens
@@ -413,7 +485,8 @@ def main() -> None:
         refs: dict = {}
         if not a.no_bridge:
             try:
-                refs[names[0]] = reference_stock(cams[0], levels)
+                refs[names[0]] = reference_stock(
+                    cams[0], levels, {lv: r.get(names[0], {}).get("zoom") for lv, r in report["levels"].items()})
             except (Exception, SystemExit) as e:
                 refs[names[0]] = {"error": f"{type(e).__name__}: {e}"}
             # The sweeps leave the lens at the last level and off focus.
@@ -454,6 +527,14 @@ def main() -> None:
                     r[n]["ref_zoom_mismatch"] = rz   # None: the sweep's zoom is unknown
                     continue
                 r[n]["of_best"] = round(final / best, 2)
+                # The board's own landing, on the timeline's scale as a fraction of the settled
+                # picture, then of the best.
+                bo, st = r[n].get("board_only"), r[n].get("settled")
+                # Only where the video and final_sharp show the same focus: no camera-side
+                # autofocus, or its pass finished inside the recording.
+                same = r[n].get("af") is None or r[n].get("af_done_s") is not None
+                if bo and st and same:
+                    r[n]["board_of_best"] = round(final / best * bo / st, 2)
         out.write_text(json.dumps(report))
     print(table(report, names))
     fails, flags = verdict(report, names)

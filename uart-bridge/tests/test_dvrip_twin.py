@@ -6,6 +6,7 @@ two trailing bytes) and answers login, keep-alive and OPPTZControl the way
 majestic's netip does, recording every PTZ request. Skipped when python-dvr is
 not where --python-dvr defaults to (or PYTHON_DVR points)."""
 
+import argparse
 import json
 import os
 import socket
@@ -151,3 +152,62 @@ def test_roi_box_stays_inside_the_frame():
     assert A.parse_roi("0.5,0.4,0.1") == (0.5, 0.4, 0.1)
     with pytest.raises(Exception):
         A.parse_roi("0.5,1.2,0.1")
+
+
+def test_levels_and_the_moves_that_reach_them():
+    assert list(D.LEVELS)[0] == "X1.0" and "X5.0" in D.LEVELS
+    # a zoom-in level: into the wide stop, then the measured zoom-in, which is recorded
+    assert D.moves("X3.0") == [("ZoomWide", 6.5), ("ZoomTile", 2.8)]
+    # X1.0 is the wide stop itself: settled at X2.0 first, then the zoom-out into it is recorded
+    assert D.moves("X1.0") == [("ZoomWide", 6.5), ("ZoomTile", 1.6), ("ZoomWide", 6.5)]
+    # a zoom-out level: settled at the tele end, then the zoom-out (full range less the level's
+    # zoom-in hold) is recorded; out-X1.0 goes into the wide stop
+    assert D.moves("out-X3.0") == [("ZoomWide", 6.5), ("ZoomTile", 6.5), ("ZoomWide", 2.8)]
+    assert D.moves("out-X1.0")[-1] == ("ZoomWide", 6.5)
+    assert set(D.OUT_LEVELS) == {"out-X4.0", "out-X3.0", "out-X2.0", "out-X1.5", "out-X1.0"}
+    assert list(D.IN_LEVELS) == ["X1.0", "X2.0", "X3.0", "X4.0", "X5.0"]   # the default run
+
+
+def test_board_only_is_the_picture_before_the_pass_starts():
+    # stop at 4.0 s: the window is 1.5-2.8 s after it, before majestic-af's pass (3 s)
+    tl = [(t / 10, 100.0 if t < 55 else 50.0 if t <= 68 else 200.0) for t in range(0, 120)]
+    assert D.board_only(tl, 4.0) == 50.0
+    assert D.board_only([(0.0, 1.0)], 4.0) is None
+
+
+def test_stock_reference_goes_on_to_the_runs_zoom(monkeypatch):
+    """A reference that stopped short of the run's zoom nudges on the same way; one that
+    reached it does not; and it never turns round."""
+    sent = []
+    zoom = {"z": 5.0}
+
+    class FakeBoard:
+        def __init__(self, *a):
+            pass
+
+        def pulse(self, tag, cmd, hold):
+            sent.append((cmd, hold))
+            if hold == D.REF_NUDGE_S:            # a nudge: 0.1 of zoom
+                zoom["z"] = round(zoom["z"] + (-0.1 if cmd == A.ZOOM_OUT else 0.1), 1)
+            elif hold >= D.T.WIDE_S:             # into a stop
+                zoom["z"] = 1.0 if cmd == A.ZOOM_OUT else 5.0
+            else:                                # the level's own zoom-out, short of the run's
+                zoom["z"] = 2.2
+            return [zoom["z"]]
+
+        def focus_offset(self):
+            return {"best": 1.0}
+
+    monkeypatch.setattr(D.T, "Board", FakeBoard)
+    monkeypatch.setattr(D.time, "sleep", lambda s: None)
+    cam = argparse.Namespace(name="stock", rtsp="-", roi=None)
+    # out-X3.0: into the wide stop, to the tele end, then a zoom-out that ends at X2.2; the
+    # run reached X2.0, so two nudges out
+    out = D.reference_stock(cam, ["out-X3.0"], {"out-X3.0": 2.0})
+    assert out["out-X3.0"]["reached"] == 2.0
+    assert sent[-2:] == [(A.ZOOM_OUT, D.REF_NUDGE_S)] * 2
+    assert all(cmd == A.ZOOM_OUT for cmd, h in sent if h == D.REF_NUDGE_S)
+    # no target, or already there: no nudge
+    sent.clear()
+    D.reference_stock(cam, ["out-X3.0"], None)
+    assert all(h != D.REF_NUDGE_S for _, h in sent)
