@@ -249,6 +249,15 @@ def reference_openipc(cam: OpenIpcCamera, levels: dict) -> dict:
     return out
 
 
+def home(step) -> None:
+    """Leave a lens at the wide end and in focus. Into the wide stop, then a
+    short zoom back out of it: the XM board re-derives focus from its own curve
+    when a zoom LEAVES the wide stop (a focus offset made there is not carried),
+    not when it arrives, and the zoom books majestic-af a pass on OpenIPC."""
+    step("ZoomWide", hold=T.WIDE_S, settle=1.0)
+    step("ZoomTile", hold=0.3, settle=0)
+
+
 def in_parallel(cams: list[Camera], fn, *args) -> dict:
     """Run fn(cam, *args) on every camera at once; errors are results."""
     results: dict = {}
@@ -366,7 +375,7 @@ def main() -> None:
     A.CAPTURES.mkdir(exist_ok=True)
     bridge = None if a.no_bridge else A.Bridge(f"captures/dvrip-twin-{stamp}.jsonl",
                                                 "dvrip_twin: stock camera's lens traffic")
-    report: dict = {"stamp": stamp, "no_bridge": a.no_bridge, "levels": {}}
+    report: dict = {"stamp": stamp, "no_bridge": a.no_bridge, "levels": {}, "restore": {}}
     out = A.CAPTURES / f"dvrip-twin-{stamp}.json"
     cams: list[Camera] = []
     try:
@@ -381,28 +390,38 @@ def main() -> None:
             gate = threading.Barrier(len(cams), timeout=180)
             report["levels"][lv] = in_parallel(cams, level_run, lv, hold, gate, stamp)
             r = report["levels"][lv]
+            if any("error" in r.get(n, {}) for n in names):
+                # A camera that failed is in an unknown state: move no lens
+                # further except to put it back at the wide stop below.
+                report["aborted"] = f"at {lv}"
+                print(f"{lv}: a camera failed, stopping the run", flush=True)
+                break
             print(f"{lv}: " + "  ".join(f"{n} X{r[n].get('zoom')} settled {r[n].get('settled')} "
                                         f"in {r[n].get('settle_s')}s af {r[n].get('af_done_s')}s"
                                         for n in names), flush=True)
-        report["manual"] = in_parallel(cams, manual_focus_run, threading.Barrier(len(cams), timeout=180))
-        # The manual check left both lenses defocused on purpose. Zooming into the
-        # wide stop puts the stock board's focus back on its curve, and books
-        # majestic-af an after-zoom pass on the OpenIPC camera.
-        report["restore"] = in_parallel(cams, lambda cam: cam.dvrip.step("ZoomWide", hold=T.WIDE_S, settle=0)
-                                        or {})
+        else:
+            report["manual"] = in_parallel(cams, manual_focus_run, threading.Barrier(len(cams), timeout=180))
+        # The manual check left both lenses defocused on purpose.
+        report["restore"] = in_parallel(cams, lambda cam: home(cam.dvrip.step) or {})
     finally:
         for c in cams:
             c.close()
         if bridge:
             bridge.close()
     out.write_text(json.dumps(report))   # the levels are kept whatever the reference does
-    if a.reference:
+    if a.reference and not report.get("aborted"):
         refs: dict = {}
         if not a.no_bridge:
             try:
                 refs[names[0]] = reference_stock(cams[0], levels)
             except (Exception, SystemExit) as e:
                 refs[names[0]] = {"error": f"{type(e).__name__}: {e}"}
+            # The sweeps leave the lens at the last level and off focus.
+            try:
+                home(lambda cmd, hold, settle: A.pulse("dvrip-twin-home", A.ZOOM_OUT if cmd == "ZoomWide"
+                                                       else A.ZOOM_IN, hold=hold))
+            except (Exception, SystemExit) as e:
+                report["restore"][names[0]] = {"error": f"after the reference: {type(e).__name__}: {e}"}
         ref_cam = None
         try:
             ref_cam = OpenIpcCamera(
@@ -414,6 +433,10 @@ def main() -> None:
             refs[names[1]] = {"error": f"{type(e).__name__}: {e}"}
         finally:
             if ref_cam:
+                try:   # the sweep ends at its near end
+                    home(ref_cam.dvrip.step)
+                except (Exception, SystemExit) as e:
+                    report["restore"][names[1]] = {"error": f"after the reference: {type(e).__name__}: {e}"}
                 ref_cam.close()
         report["reference"] = refs
         # The same metric on both sides of the ratio: centre sharpness at full size.
