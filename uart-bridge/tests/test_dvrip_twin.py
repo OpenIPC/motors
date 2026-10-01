@@ -100,19 +100,43 @@ def test_settled_and_settle_time():
 
 def test_verdict_fails_on_zoom_and_errors_and_flags_soft_focus():
     names = ("stock", "openipc")
+    done = {"af": "done fv=1", "af_done_s": 15.8}
     report = {"levels": {
-        "X2.0": {"stock": {"zoom": 2.2, "of_best": 0.4}, "openipc": {"zoom": 2.2, "of_best": 0.95, "af": "done fv=1"}},
-        "X3.0": {"stock": {"zoom": 3.1, "of_best": 1.0}, "openipc": {"zoom": 3.4, "of_best": 0.8, "af": "done"}},
-        "X5.0": {"stock": {"zoom": 4.8}, "openipc": {"zoom": 5.0}},
-        "X4.0": {"stock": {"error": "SystemExit: DVRIP login failed"}, "openipc": {"zoom": 4.0, "af": "failed: x"}},
-    }, "manual": {"openipc": {"refocused": True}}}
+        "X2.0": {"stock": {"zoom": 2.2, "of_best": 0.4}, "openipc": {"zoom": 2.2, "of_best": 0.95, **done}},
+        "X3.0": {"stock": {"zoom": 3.1, "of_best": 1.0}, "openipc": {"zoom": 3.4, "of_best": 0.8, **done}},
+        "X4.0": {"stock": {"error": "SystemExit: DVRIP login failed"}, "openipc": {"zoom": 4.0, **done}},
+        "X5.0": {"stock": {"zoom": 4.8}, "openipc": {"zoom": 5.0, "af": "failed: x", "af_done_s": 16.0}},
+    }, "manual": {"openipc": {"refocused": True, "moved": True}, "stock": {"moved": True}}}
     fails, flags = D.verdict(report, names)
     assert any("X3.0: zoom" in f for f in fails) and any("X4.0 stock" in f for f in fails)
     assert not any("X2.0" in f or "X5.0" in f for f in fails)   # 0.2 is within tolerance
     assert any("X3.0" in f and "80%" in f for f in flags)
-    assert any("X4.0" in f and "autofocus" in f for f in flags)
+    assert any("X5.0" in f and "autofocus failed" in f for f in flags)
     assert any("refocused" in f for f in flags)
     assert "X2.0" in D.table(report, names)
+
+
+def test_verdict_does_not_pass_what_it_did_not_measure():
+    names = ("stock", "openipc")
+    ok = {"af": "done fv=1", "af_done_s": 15.8}
+    # a missing zoom reading fails, unless the stock side has no bridge by choice
+    r = {"levels": {"X2.0": {"stock": {"zoom": None}, "openipc": {"zoom": 2.2, **ok}}}}
+    assert D.verdict(r, names)[0]
+    assert not D.verdict({**r, "no_bridge": True}, names)[0]
+    r = {"levels": {"X2.0": {"stock": {"zoom": 2.2}, "openipc": {"zoom": None, **ok}}}}
+    assert D.verdict(r, names)[0]
+    # a stale "done" with no pass seen to finish is not a finished pass
+    r = {"levels": {"X2.0": {"stock": {"zoom": 2.2}, "openipc": {"zoom": 2.2, "af": "done", "af_done_s": None}}}}
+    assert any("not seen to finish" in f for f in D.verdict(r, names)[1])
+    # errors in the manual check or the reference fail the run
+    base = {"levels": {"X2.0": {"stock": {"zoom": 2.2}, "openipc": {"zoom": 2.2, **ok}}}}
+    assert D.verdict({**base, "manual": {"stock": {"error": "boom"}}}, names)[0]
+    assert D.verdict({**base, "reference": {"stock": {"X2.0": {"error": "flat"}}}}, names)[0]
+    assert D.verdict({**base, "reference": {"openipc": {"error": "HTTP 500"}}}, names)[0]
+    # a nudge that did not change the picture makes the no-refocus check inconclusive
+    flags = D.verdict({**base, "manual": {"openipc": {"refocused": False, "moved": False}}}, names)[1]
+    assert any("inconclusive" in f for f in flags)
+    assert D.verdict(base, names) == ([], [])
 
 
 def test_roi_box_stays_inside_the_frame():

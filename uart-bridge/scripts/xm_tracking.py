@@ -92,7 +92,7 @@ class Board:
             time.sleep(max(0.0, rec.t0 + lead - time.monotonic()))
             cmd_at = rec.elapsed()
             z = self.inject(tag, records, tail=max(1.0, seconds - lead - records[-1][0] - 1))
-            tl = rec.finish()
+            tl = rec.finish(self.roi)
         finally:
             rec.close()
         return tl, z, cmd_at

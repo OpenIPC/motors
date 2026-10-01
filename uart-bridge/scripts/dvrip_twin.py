@@ -142,7 +142,7 @@ def wait_af(cam: Camera, before: str | None, t_stop: float, limit: float) -> tup
     return cam.af_status(), None
 
 
-def level_run(cam: Camera, level: str, hold: float, gate: threading.Barrier) -> dict:
+def level_run(cam: Camera, level: str, hold: float, gate: threading.Barrier, stamp: str) -> dict:
     """Wide stop, then one held zoom-in to `level`, recorded."""
     cam.dvrip.mark(f"{level}: to the wide stop")
     gate.wait()
@@ -151,7 +151,7 @@ def level_run(cam: Camera, level: str, hold: float, gate: threading.Barrier) -> 
     wait_af(cam, cam.af_status(), t_wide, 40)  # majestic-af books a pass after a zoom-out too
     time.sleep(max(0.0, t_wide + QUIET_S - time.monotonic()))
     before = cam.af_status()
-    out = A.CAPTURES / f"dvrip-twin-{cam.name}-{level}.mkv"
+    out = A.CAPTURES / f"dvrip-twin-{stamp}-{cam.name}-{level}.mkv"
     gate.wait()                                   # both zooms start together
     rec = T.Recording(cam.rtsp, out, OBSERVE_S, cam.name)
     try:
@@ -168,21 +168,34 @@ def level_run(cam: Camera, level: str, hold: float, gate: threading.Barrier) -> 
     # sweep's best is in; the timeline (smaller, for timing) is not comparable.
     return {"cmd_at": cmd_at, "stop_at": stop_at, "zoom": cam.zoom(), "af": af, "af_done_s": af_s,
             "settled": settled(tl), "settle_s": settle_time(tl, stop_at), "final_sharp": cam.sharpness(),
-            "sharp": tl}
+            "video": out.name, "sharp": tl}
+
+
+NUDGE_S = 1.5          # well past the 0.45-0.7 s gear slack a reversal takes up first
+NUDGE_MIN_CHANGE = 0.1  # a nudge that changes sharpness less than this proves nothing
 
 
 def manual_focus_run(cam: Camera, gate: threading.Barrier) -> dict:
-    """A short focus nudge by hand: the picture changes, and no autofocus
-    pass may follow it (it would undo what the operator just did)."""
+    """A focus nudge by hand: the picture changes, and no autofocus pass may
+    follow it (it would undo what the operator just did). The status is polled
+    through the whole 15 s, so a pass that starts and ends between two
+    samples is still seen."""
     before = cam.af_status()
     gate.wait()
     s0 = cam.sharpness()
     cam.dvrip.mark("manual focus nudge")
-    cam.dvrip.step("FocusNear", hold=0.4, settle=0)
-    time.sleep(15)
-    after = cam.af_status()
-    return {"sharp_before": s0, "sharp_after": cam.sharpness(),
-            "af_after": after, "refocused": before is not None and after != before}
+    cam.dvrip.step("FocusNear", hold=NUDGE_S, settle=0)
+    seen = set()
+    t_end = time.monotonic() + 15
+    while time.monotonic() < t_end:
+        st = cam.af_status()
+        if st is not None:
+            seen.add(st)
+        time.sleep(0.5)
+    s1 = cam.sharpness()
+    return {"sharp_before": s0, "sharp_after": s1, "statuses": sorted(seen),
+            "refocused": before is not None and any(st != before for st in seen),
+            "moved": bool(s0) and abs(s1 - s0) >= NUDGE_MIN_CHANGE * s0}
 
 
 def reference_stock(cam: StockCamera, levels: dict) -> dict:
@@ -248,16 +261,35 @@ def verdict(report: dict, names: tuple[str, str]) -> tuple[list[str], list[str]]
         for n in names:
             if "error" in r.get(n, {}):
                 fails.append(f"{lv} {n}: {r[n]['error']}")
+        if any("error" in r.get(n, {}) for n in names):
+            continue
         a, b = r.get(stock, {}).get("zoom"), r.get(oip, {}).get("zoom")
-        if a is not None and b is not None and abs(a - b) > ZOOM_TOLERANCE + 1e-9:
+        if b is None or (a is None and not report.get("no_bridge")):
+            fails.append(f"{lv}: no zoom reading ({stock} {a}, {oip} {b})")
+        elif a is not None and abs(a - b) > ZOOM_TOLERANCE + 1e-9:
             fails.append(f"{lv}: zoom {stock} X{a} vs {oip} X{b}")
-        if r.get(oip, {}).get("af") and not str(r[oip]["af"]).startswith("done"):
+        if r.get(oip, {}).get("af_done_s") is None:
+            flags.append(f"{lv}: {oip} after-zoom autofocus not seen to finish ({r[oip].get('af')})")
+        elif not str(r[oip].get("af")).startswith("done"):
             flags.append(f"{lv}: {oip} autofocus {r[oip]['af']}")
         ra, rb = r.get(stock, {}).get("of_best"), r.get(oip, {}).get("of_best")
         if ra is not None and rb is not None and rb < ra:
             flags.append(f"{lv}: {oip} settled at {rb:.0%} of its best, {stock} at {ra:.0%}")
-    if report.get("manual", {}).get(oip, {}).get("refocused"):
+    for n, m in report.get("manual", {}).items():
+        if "error" in m:
+            fails.append(f"manual focus {n}: {m['error']}")
+    m = report.get("manual", {}).get(oip, {})
+    if m.get("refocused"):
         flags.append(f"{oip} refocused after a manual focus nudge")
+    if m and "error" not in m and not m.get("moved"):
+        flags.append(f"{oip} manual nudge barely changed the picture: the no-refocus check is inconclusive")
+    for n, levels in report.get("reference", {}).items():
+        if "error" in levels:
+            fails.append(f"reference {n}: {levels['error']}")
+            continue
+        for lv, rr in levels.items():
+            if "error" in rr:
+                fails.append(f"reference {lv} {n}: {rr['error']}")
     return fails, flags
 
 
@@ -303,9 +335,11 @@ def main() -> None:
                                                                 password=a.stock_password))
     oip_rtsp = a.openipc_rtsp or f"rtsp://{a.openipc_http}@{a.openipc}/stream=0"
     stamp = time.strftime("%Y%m%d-%H%M%S")
+    A.CAPTURES.mkdir(exist_ok=True)
     bridge = None if a.no_bridge else A.Bridge(f"captures/dvrip-twin-{stamp}.jsonl",
                                                 "dvrip_twin: stock camera's lens traffic")
-    report: dict = {"stamp": stamp, "levels": {}}
+    report: dict = {"stamp": stamp, "no_bridge": a.no_bridge, "levels": {}}
+    out = A.CAPTURES / f"dvrip-twin-{stamp}.json"
     cams: list[Camera] = []
     try:
         time.sleep(2)
@@ -317,7 +351,7 @@ def main() -> None:
                               a.openipc, a.openipc_http, a.openipc_roi)]
         for lv, hold in levels.items():
             gate = threading.Barrier(len(cams), timeout=180)
-            report["levels"][lv] = in_parallel(cams, level_run, lv, hold, gate)
+            report["levels"][lv] = in_parallel(cams, level_run, lv, hold, gate, stamp)
             r = report["levels"][lv]
             print(f"{lv}: " + "  ".join(f"{n} X{r[n].get('zoom')} settled {r[n].get('settled')} "
                                         f"in {r[n].get('settle_s')}s af {r[n].get('af_done_s')}s"
@@ -328,24 +362,35 @@ def main() -> None:
             c.close()
         if bridge:
             bridge.close()
+    out.write_text(json.dumps(report))   # the levels are kept whatever the reference does
     if a.reference:
-        refs = {}
+        refs: dict = {}
         if not a.no_bridge:
-            refs[names[0]] = reference_stock(cams[0], levels)
-        refs[names[1]] = reference_openipc(OpenIpcCamera(
-            names[1], A.Dvrip(argparse.Namespace(python_dvr=a.python_dvr, camera=a.openipc,
-                                                 user=a.openipc_user, password=a.openipc_password)),
-            oip_rtsp, a.openipc, a.openipc_http, a.openipc_roi), levels)
+            try:
+                refs[names[0]] = reference_stock(cams[0], levels)
+            except (Exception, SystemExit) as e:
+                refs[names[0]] = {"error": f"{type(e).__name__}: {e}"}
+        ref_cam = None
+        try:
+            ref_cam = OpenIpcCamera(
+                names[1], A.Dvrip(argparse.Namespace(python_dvr=a.python_dvr, camera=a.openipc,
+                                                     user=a.openipc_user, password=a.openipc_password)),
+                oip_rtsp, a.openipc, a.openipc_http, a.openipc_roi)
+            refs[names[1]] = reference_openipc(ref_cam, levels)
+        except (Exception, SystemExit) as e:
+            refs[names[1]] = {"error": f"{type(e).__name__}: {e}"}
+        finally:
+            if ref_cam:
+                ref_cam.close()
         report["reference"] = refs
         # The same metric on both sides of the ratio: centre sharpness at full size.
         for lv, r in report["levels"].items():
             for n in names:
-                best = refs.get(n, {}).get(lv, {}).get("best")
+                best = refs.get(n, {}).get(lv, {}).get("best") if "error" not in refs.get(n, {}) else None
                 final = r.get(n, {}).get("final_sharp")
                 if best and final:
                     r[n]["of_best"] = round(final / best, 2)
-    out = A.CAPTURES / f"dvrip-twin-{stamp}.json"
-    out.write_text(json.dumps(report))
+        out.write_text(json.dumps(report))
     print(table(report, names))
     fails, flags = verdict(report, names)
     for f in flags:
