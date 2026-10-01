@@ -25,7 +25,8 @@ at something textured there, or point --stock-roi / --openipc-roi at it.
 The OpenIPC camera needs majestic with netip PTZ and netip.enabled, netip.user
 and netip.password (the sofia hash of the DVRIP password) set; see TWIN.md.
 Results: captures/dvrip-twin-<time>.json and a table. Exits non-zero when the
-zoom differs by more than 0.1 at any level, or a camera fails.
+zoom differs by more than 0.2 at any level (see ZOOM_TOLERANCE), or a camera
+fails.
 """
 
 from __future__ import annotations
@@ -44,7 +45,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import xm_tracking as T  # noqa: E402
 import xm_uart_audit as A  # noqa: E402
 
-ZOOM_TOLERANCE = 0.1
+# The same held DVRIP move does not zoom both cameras exactly alike. The stock
+# firmware puts the start frame on its lens wire 0.02-0.22 s after the request
+# and answers only then, and python-dvr starts its hold on the answer, so the
+# stock lens moves 0.10-0.15 s longer than asked (measured on the bridge: 1.6 s
+# held 1.70 s, 2.8 s held 2.95 s, 4.1 s held 4.20 s); majestic answers at once.
+# At ~0.74 x per second that is ~0.1, and the reports' 0.1 resolution can add as
+# much again.
+ZOOM_TOLERANCE = 0.2
 OBSERVE_S = 30.0  # video per level: the board's ~10 s settle, then majestic-af's pass
 QUIET_S = 12.0    # after the zoom-out, before the next zoom-in
 
@@ -241,7 +249,7 @@ def verdict(report: dict, names: tuple[str, str]) -> tuple[list[str], list[str]]
             if "error" in r.get(n, {}):
                 fails.append(f"{lv} {n}: {r[n]['error']}")
         a, b = r.get(stock, {}).get("zoom"), r.get(oip, {}).get("zoom")
-        if a is not None and b is not None and abs(a - b) > ZOOM_TOLERANCE:
+        if a is not None and b is not None and abs(a - b) > ZOOM_TOLERANCE + 1e-9:
             fails.append(f"{lv}: zoom {stock} X{a} vs {oip} X{b}")
         if r.get(oip, {}).get("af") and not str(r[oip]["af"]).startswith("done"):
             flags.append(f"{lv}: {oip} autofocus {r[oip]['af']}")

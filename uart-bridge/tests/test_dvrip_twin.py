@@ -103,11 +103,12 @@ def test_verdict_fails_on_zoom_and_errors_and_flags_soft_focus():
     report = {"levels": {
         "X2.0": {"stock": {"zoom": 2.2, "of_best": 0.4}, "openipc": {"zoom": 2.2, "of_best": 0.95, "af": "done fv=1"}},
         "X3.0": {"stock": {"zoom": 3.1, "of_best": 1.0}, "openipc": {"zoom": 3.4, "of_best": 0.8, "af": "done"}},
+        "X5.0": {"stock": {"zoom": 4.8}, "openipc": {"zoom": 5.0}},
         "X4.0": {"stock": {"error": "SystemExit: DVRIP login failed"}, "openipc": {"zoom": 4.0, "af": "failed: x"}},
     }, "manual": {"openipc": {"refocused": True}}}
     fails, flags = D.verdict(report, names)
     assert any("X3.0: zoom" in f for f in fails) and any("X4.0 stock" in f for f in fails)
-    assert not any("X2.0" in f for f in fails)
+    assert not any("X2.0" in f or "X5.0" in f for f in fails)   # 0.2 is within tolerance
     assert any("X3.0" in f and "80%" in f for f in flags)
     assert any("X4.0" in f and "autofocus" in f for f in flags)
     assert any("refocused" in f for f in flags)
