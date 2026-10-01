@@ -416,7 +416,8 @@ def main() -> None:
     p.add_argument("--python-dvr", default="~/git/python-dvr")
     a = p.parse_args()
 
-    levels = [lv for lv in LEVELS if lv in a.levels]
+    # In the order asked for; a level named twice runs once (the report is keyed by level).
+    levels = list(dict.fromkeys(a.levels))
     names = ("stock", "openipc")
     stock_rtsp = a.stock_rtsp or A.rtsp_url(argparse.Namespace(rtsp=None, camera=a.stock, user=a.stock_user,
                                                                 password=a.stock_password))
@@ -507,7 +508,10 @@ def main() -> None:
                 # The board's own landing, on the timeline's scale as a fraction of the settled
                 # picture, then of the best.
                 bo, st = r[n].get("board_only"), r[n].get("settled")
-                if bo and st:
+                # Only where the video and final_sharp show the same focus: no camera-side
+                # autofocus, or its pass finished inside the recording.
+                same = r[n].get("af") is None or r[n].get("af_done_s") is not None
+                if bo and st and same:
                     r[n]["board_of_best"] = round(final / best * bo / st, 2)
         out.write_text(json.dumps(report))
     print(table(report, names))
