@@ -160,7 +160,9 @@ def level_run(cam: Camera, level: str, hold: float, gate: threading.Barrier, sta
         cam.dvrip.mark(f"{level}: zoom in {hold} s")
         cam.dvrip.step("ZoomTile", hold=hold, settle=0)
         stop_at, t_stop = rec.elapsed(), time.monotonic()
-        af, af_s = wait_af(cam, before, t_stop, OBSERVE_S - (stop_at - cmd_at))
+        # Only as long as the recording still runs: a pass that finishes after
+        # the video ends has no settled picture to show for it.
+        af, af_s = wait_af(cam, before, t_stop, max(0.0, OBSERVE_S - stop_at))
         tl = rec.finish(cam.roi)
     finally:
         rec.close()
