@@ -109,9 +109,9 @@ def test_verdict_fails_on_zoom_and_errors_and_flags_soft_focus():
     }, "manual": {"openipc": {"refocused": True, "moved": True}, "stock": {"moved": True}}}
     fails, flags = D.verdict(report, names)
     assert any("X3.0: zoom" in f for f in fails) and any("X4.0 stock" in f for f in fails)
-    assert not any("X2.0" in f or "X5.0" in f for f in fails)   # 0.2 is within tolerance
+    assert not any("X2.0" in f or "X5.0: zoom" in f for f in fails)   # 0.2 is within tolerance
     assert any("X3.0" in f and "80%" in f for f in flags)
-    assert any("X5.0" in f and "autofocus failed" in f for f in flags)
+    assert any("X5.0" in f and "autofocus failed" in f for f in fails)
     assert any("refocused" in f for f in flags)
     assert "X2.0" in D.table(report, names)
 
@@ -136,6 +136,9 @@ def test_verdict_does_not_pass_what_it_did_not_measure():
     # a nudge that did not change the picture makes the no-refocus check inconclusive
     flags = D.verdict({**base, "manual": {"openipc": {"refocused": False, "moved": False}}}, names)[1]
     assert any("inconclusive" in f for f in flags)
+    flags = D.verdict({"levels": {"X2.0": {"stock": {"zoom": 2.2, "ref_zoom_mismatch": 2.0},
+                                           "openipc": {"zoom": 2.2, **ok}}}}, names)[1]
+    assert any("reference swept at X2.0" in f for f in flags)
     assert D.verdict(base, names) == ([], [])
 
 

@@ -226,7 +226,14 @@ def reference_openipc(cam: OpenIpcCamera, levels: dict) -> dict:
             urllib.request.urlopen(req, timeout=5).read()
             time.sleep(0.45)
             curve.append(cam.sharpness())
-        out[lv] = {"reached": cam.zoom(), "best": max(curve), "curve": curve}
+        best = max(range(len(curve)), key=curve.__getitem__)
+        if best in (0, len(curve) - 1):
+            # The sharpest sample at an end of the sweep: the crest was never
+            # crossed, so this is no best focus (as focus_offset decides it too).
+            out[lv] = {"reached": cam.zoom(), "error": f"no peak inside the sweep (sharpest at step {best})",
+                       "curve": curve}
+        else:
+            out[lv] = {"reached": cam.zoom(), "best": curve[best], "curve": curve}
     return out
 
 
@@ -273,7 +280,11 @@ def verdict(report: dict, names: tuple[str, str]) -> tuple[list[str], list[str]]
         if r.get(oip, {}).get("af_done_s") is None:
             flags.append(f"{lv}: {oip} after-zoom autofocus not seen to finish ({r[oip].get('af')})")
         elif not str(r[oip].get("af")).startswith("done"):
-            flags.append(f"{lv}: {oip} autofocus {r[oip]['af']}")
+            fails.append(f"{lv}: {oip} autofocus {r[oip]['af']}")
+        for n in names:
+            if r.get(n, {}).get("ref_zoom_mismatch"):
+                flags.append(f"{lv}: {n} reference swept at X{r[n]['ref_zoom_mismatch']}, the level at "
+                             f"X{r[n].get('zoom')}: no % of best")
         ra, rb = r.get(stock, {}).get("of_best"), r.get(oip, {}).get("of_best")
         if ra is not None and rb is not None and rb < ra:
             flags.append(f"{lv}: {oip} settled at {rb:.0%} of its best, {stock} at {ra:.0%}")
@@ -359,6 +370,10 @@ def main() -> None:
                                         f"in {r[n].get('settle_s')}s af {r[n].get('af_done_s')}s"
                                         for n in names), flush=True)
         report["manual"] = in_parallel(cams, manual_focus_run, threading.Barrier(len(cams), timeout=180))
+        # The manual check left both lenses defocused on purpose. Zooming into the
+        # wide stop puts the stock board's focus back on its curve, and books
+        # majestic-af an after-zoom pass on the OpenIPC camera.
+        in_parallel(cams, lambda cam: cam.dvrip.step("ZoomWide", hold=T.WIDE_S, settle=0))
     finally:
         for c in cams:
             c.close()
@@ -386,12 +401,20 @@ def main() -> None:
                 ref_cam.close()
         report["reference"] = refs
         # The same metric on both sides of the ratio: centre sharpness at full size.
+        # And only where the sweep ran at the level's zoom: the stock reference
+        # reaches it by timed pulses on the wire, the run by DVRIP, which holds
+        # the stock lens a little longer (see ZOOM_TOLERANCE).
         for lv, r in report["levels"].items():
             for n in names:
-                best = refs.get(n, {}).get(lv, {}).get("best") if "error" not in refs.get(n, {}) else None
-                final = r.get(n, {}).get("final_sharp")
-                if best and final:
-                    r[n]["of_best"] = round(final / best, 2)
+                ref = refs.get(n, {}).get(lv, {}) if "error" not in refs.get(n, {}) else {}
+                best, final = ref.get("best"), r.get(n, {}).get("final_sharp")
+                if not (best and final):
+                    continue
+                z, rz = r[n].get("zoom"), ref.get("reached")
+                if z is not None and rz is not None and abs(z - rz) > 0.1 + 1e-9:
+                    r[n]["ref_zoom_mismatch"] = rz
+                    continue
+                r[n]["of_best"] = round(final / best, 2)
         out.write_text(json.dumps(report))
     print(table(report, names))
     fails, flags = verdict(report, names)
