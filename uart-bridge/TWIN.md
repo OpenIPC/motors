@@ -90,6 +90,35 @@ This measures how far each board's tracked focus is from that camera's sharpest 
 - **Same travel, different sharp point:** the fault is optical or mechanical in that lens (the focus group has shifted, or the back-focus has changed).
 - **Different travel:** the board's limits or reference differ.
 
+## 6. Driving both cameras over DVRIP
+
+The steps above compare the two lens *boards*, with majestic kept off the
+second camera's lens. To compare the two *cameras* instead, the stock
+firmware against OpenIPC with majestic-af focusing, drive both the same way:
+over DVRIP, the protocol the stock firmware's own clients use. majestic answers
+DVRIP PTZ (`OPPTZControl`) once netip is on. On the OpenIPC camera:
+
+1. Stop the relay and give the lens back to majestic: `isp.autofocus.enabled:
+   true`, majestic-af installed.
+2. Turn netip on: `netip.enabled: true`, `netip.user: admin`, and
+   `netip.password` set to the **sofia hash** of the DVRIP password. netip
+   compares that hash verbatim. For an empty password it is `tlJwpbo6`; for
+   any other, use python-dvr's `DVRIPCam.sofia_hash`.
+3. Restart majestic and check that port 34567 is listening.
+
+Then, on the lab host:
+
+```sh
+uv run scripts/dvrip_twin.py --stock REF --openipc CAM --openipc-http root:PASS --reference
+```
+
+Sharpness is measured at the frame centre, where the zoom goes, so aim both
+cameras at something textured there; a plain wall reads as no sharpness at any
+focus. Otherwise point `--stock-roi` / `--openipc-roi X,Y,R` (fractions of the
+frame) at texture that stays in view at tele. The stock camera's zoom comes from
+its board's reports on the bridge, so the host must be wired to it; with
+`--no-bridge` the run still compares sharpness and timing.
+
 ## Pitfalls (all hit in the lab)
 - **Two readers on the lens tty.** See step 1.
 - **Unequal starting focus.** An XM board refocuses by itself after every zoom, from its tracking; the reference camera's traffic adds nothing to that, so replaying the `A5` stream or not makes no difference. Each zoom puts focus back on the board's own curve (a manual offset is mostly lost), but the curve itself can differ between lenses, so compare from the same starting state anyway. Allow ~10 s after a zoom stop before measuring: the board can make a last focus move that late.

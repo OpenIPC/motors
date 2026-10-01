@@ -52,8 +52,8 @@ LEVELS = {"X2.0": 1.6, "X3.0": 2.8, "X4.0": 4.1, "X5.0": 6.5}
 
 
 class Board:
-    def __init__(self, name: str, ptz: str, rtsp: str):
-        self.name, self.ptz, self.rtsp = name, (None if ptz == "-" else ptz), rtsp
+    def __init__(self, name: str, ptz: str, rtsp: str, roi=None):
+        self.name, self.ptz, self.rtsp, self.roi = name, (None if ptz == "-" else ptz), rtsp, roi
 
     def pulse(self, tag: str, cmd: str, hold: float) -> list[float]:
         return A.pulse(f"trk-{self.name}-{tag}", cmd, hold=hold, ptz=self.ptz)
@@ -62,7 +62,7 @@ class Board:
         return A.inject(f"trk-{self.name}-{tag}", records, tail=tail, ptz=self.ptz)
 
     def sharpness(self) -> float:
-        return round(A.center_sharpness(argparse.Namespace(rtsp=self.rtsp)), 1)
+        return round(A.center_sharpness(argparse.Namespace(rtsp=self.rtsp, roi=self.roi)), 1)
 
     def to_level(self, hold: float) -> float | None:
         """Wide stop, then zoom in for `hold` s and wait out the settle."""
@@ -73,7 +73,7 @@ class Board:
         return z[-1] if z else None
 
     def focus_offset(self, away: float = 1.5, steps: int = 30) -> dict:
-        a = argparse.Namespace(rtsp=self.rtsp, ptz=self.ptz, away=away, steps=steps)
+        a = argparse.Namespace(rtsp=self.rtsp, ptz=self.ptz, away=away, steps=steps, roi=self.roi)
         try:
             curve, offset = A.focus_offset(a, tag=f"trk-{self.name}-fo", verbose=False)
         except (SystemExit, A.CaptureError) as e:
@@ -87,47 +87,71 @@ class Board:
         ffmpeg's own progress; the camera's encode and network latency, a few
         hundred ms, is not in it)."""
         out = A.CAPTURES / f"trk-{self.name}-{tag}.mkv"
-        # Frames are timestamped when they ARRIVE: an RTSP server may open with frames it
-        # buffered earlier, which with the stream's own timestamps would put the start of
-        # the video seconds in the past. Received, they pile up at t~0 instead.
-        rec = subprocess.Popen(["ffmpeg", "-loglevel", "error", "-rtsp_transport", "tcp",
-                                "-use_wallclock_as_timestamps", "1", "-i", self.rtsp,
-                                "-t", str(seconds), "-c", "copy", "-y", str(out),
-                                "-progress", "pipe:1", "-stats_period", "0.1"],
-                               stdout=subprocess.PIPE, text=True)
+        rec = Recording(self.rtsp, out, seconds, self.name)
+        try:
+            time.sleep(max(0.0, rec.t0 + lead - time.monotonic()))
+            cmd_at = rec.elapsed()
+            z = self.inject(tag, records, tail=max(1.0, seconds - lead - records[-1][0] - 1))
+            tl = rec.finish()
+        finally:
+            rec.close()
+        return tl, z, cmd_at
+
+
+class Recording:
+    """`seconds` of an RTSP stream recorded to `out`, on its own timeline.
+
+    Frames are timestamped when they ARRIVE: an RTSP server may open with frames
+    it buffered earlier, which with the stream's own timestamps would put the
+    start of the video seconds in the past. Received, they pile up at t~0
+    instead. t=0 is dated from ffmpeg's progress reports (out_time_us, every
+    0.1 s): the first one with video in it, minus that much. The file itself is
+    no clock -- ffmpeg buffers its writes. The camera's own encode and network
+    latency, a few hundred ms, is not in it."""
+
+    def __init__(self, rtsp: str, out: Path, seconds: float, name: str = "camera"):
+        self.out, self.name = out, name
+        self.rec = subprocess.Popen(["ffmpeg", "-loglevel", "error", "-rtsp_transport", "tcp",
+                                     "-use_wallclock_as_timestamps", "1", "-i", rtsp,
+                                     "-t", str(seconds), "-c", "copy", "-y", str(out),
+                                     "-progress", "pipe:1", "-stats_period", "0.1"],
+                                    stdout=subprocess.PIPE, text=True)
         first = {}
         started = threading.Event()
 
         def progress():
-            # ffmpeg reports how much video it has written (out_time_us), every 0.1 s.
-            # The first report with video in it dates t=0 of the timeline: now minus
-            # that much. The file itself is no clock -- ffmpeg buffers its writes.
-            for line in rec.stdout:
+            for line in self.rec.stdout:
                 if not started.is_set() and line.startswith("out_time_us="):
                     us = line.split("=", 1)[1].strip()
                     if us.isdigit() and int(us) > 0:
                         first["t0"] = time.monotonic() - int(us) / 1e6
                         started.set()
 
-        reader = threading.Thread(target=progress, daemon=True)
-        reader.start()
-        try:
-            if not started.wait(20):
-                raise A.CaptureError(f"no video from {self.name} (ffmpeg exit {rec.poll()})")
-            t0 = first["t0"]
-            time.sleep(max(0.0, t0 + lead - time.monotonic()))
-            cmd_at = time.monotonic() - t0
-            z = self.inject(tag, records, tail=max(1.0, seconds - lead - records[-1][0] - 1))
-            if rec.wait() != 0:
-                raise A.CaptureError(f"recording failed on {self.name} (ffmpeg exit {rec.returncode})")
-        finally:
-            if rec.poll() is None:
-                rec.terminate()
-                rec.wait()
-        return timeline(out), z, round(cmd_at, 2)
+        threading.Thread(target=progress, daemon=True).start()
+        if not started.wait(20):
+            self.close()
+            raise A.CaptureError(f"no video from {name} (ffmpeg exit {self.rec.poll()})")
+        self.t0 = first["t0"]
+
+    def elapsed(self) -> float:
+        """Seconds since t=0 of the recording's timeline."""
+        return round(time.monotonic() - self.t0, 2)
+
+    def finish(self, roi=None) -> list[tuple[float, float]]:
+        """Wait for the recording to end; its sharpness timeline (see timeline)."""
+        if self.rec.wait() != 0:
+            raise A.CaptureError(f"recording failed on {self.name} (ffmpeg exit {self.rec.returncode})")
+        return timeline(self.out, roi=roi)
+
+    def close(self) -> None:
+        if self.rec.poll() is None:
+            self.rec.terminate()
+            self.rec.wait()
 
 
-def timeline(path: Path, fps: int = 5) -> list[tuple[float, float]]:
+def timeline(path: Path, fps: int = 5, roi=None) -> list[tuple[float, float]]:
+    """Sharpness of each frame, (t_s, tenengrad), at `fps`, on the video scaled
+    to W x H: the central box of half-size 120 px, or `roi` (A.roi_box)."""
     dec = subprocess.run(["ffmpeg", "-loglevel", "error", "-i", str(path), "-vf",
                           f"fps={fps},scale={W}:{H},format=gray", "-f", "rawvideo", "-"],
                          capture_output=True)
@@ -135,7 +159,8 @@ def timeline(path: Path, fps: int = 5) -> list[tuple[float, float]]:
     if dec.returncode != 0 or len(raw) < W * H:
         raise A.CaptureError(f"could not decode {path.name} (ffmpeg exit {dec.returncode}): "
                              f"{dec.stderr.decode(errors='replace').strip()[:200]}")
-    return [(i / fps, round(A.tenengrad(raw[i * W * H:(i + 1) * W * H], W, W // 2, H // 2, 120), 1))
+    x, y, r = A.roi_box(W, H, roi, 120)
+    return [(i / fps, round(A.tenengrad(raw[i * W * H:(i + 1) * W * H], W, x, y, r), 1))
             for i in range(len(raw) // (W * H))]
 
 

@@ -114,9 +114,10 @@ class Bridge:
 
 
 class Dvrip:
-    """The stock firmware's own PTZ control (python-dvr), with marks in a bridge."""
+    """A camera's DVRIP PTZ control (python-dvr), with marks in a bridge when
+    there is one: the stock XM firmware, or majestic with netip enabled."""
 
-    def __init__(self, a, br: "Bridge"):
+    def __init__(self, a, br: "Bridge | None" = None):
         sys.path.insert(0, str(Path(a.python_dvr).expanduser()))
         from dvrip import DVRIPCam  # python-dvr
         self.br = br
@@ -133,14 +134,18 @@ class Dvrip:
     def step(self, cmd, hold=0.5, settle=1.5):
         # python-dvr's ptz_step convention: Preset 65535 starts, -1 stops.
         # The board keeps moving until it gets a stop, so stop no matter what.
-        self.br.send(f"{cmd} start ({hold} s)")
+        self.mark(f"{cmd} start ({hold} s)")
         self.cam.set_command("OPPTZControl", {"Command": cmd, "Parameter": self.param(65535)})
         try:
             time.sleep(hold)
         finally:
-            self.br.send(f"{cmd} stop")
+            self.mark(f"{cmd} stop")
             self.cam.set_command("OPPTZControl", {"Command": cmd, "Parameter": self.param(-1)})
         time.sleep(settle)
+
+    def mark(self, note: str) -> None:
+        if self.br:
+            self.br.send(note)
 
     def close(self):
         self.cam.close()
@@ -499,8 +504,32 @@ def cmd_sync(a) -> None:
         raise SystemExit(1)
 
 
+def roi_box(w: int, h: int, roi, r: int) -> tuple[int, int, int]:
+    """Centre and half-size, in pixels, of the box sharpness is measured in:
+    `roi` = (x, y, half-size) as fractions of the frame's width, height and
+    height, or None for the central box of half-size `r` px. Kept inside it."""
+    if not roi:
+        x, y, rr = w // 2, h // 2, r
+    else:
+        x, y, rr = int(roi[0] * w), int(roi[1] * h), max(8, int(roi[2] * h))
+    rr = min(rr, w // 2 - 1, h // 2 - 1)
+    return min(max(x, rr + 1), w - rr - 1), min(max(y, rr + 1), h - rr - 1), rr
+
+
+def parse_roi(text: str) -> tuple[float, float, float]:
+    """"X,Y,R" as fractions of the frame (centre x, centre y, half-size)."""
+    try:
+        x, y, r = (float(v) for v in text.split(","))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"want X,Y,R as fractions, got {text!r}")
+    if not (0 < x < 1 and 0 < y < 1 and 0 < r < 0.5):
+        raise argparse.ArgumentTypeError(f"X and Y in 0..1 and R in 0..0.5, got {text!r}")
+    return x, y, r
+
+
 def center_sharpness(a, r: int = 200, wait: float = 240) -> float:
-    """Tenengrad of the central (2r)^2 box, two frames averaged: higher is sharper.
+    """Tenengrad of the central (2r)^2 box, or of `a.roi` if the namespace
+    has one (see roi_box), two frames averaged: higher is sharper.
 
     The XM stock firmware restarts its services now and then under a long run of
     short RTSP sessions (a focus sweep opens hundreds): RTSP, DVRIP and HTTP go
@@ -516,7 +545,8 @@ def center_sharpness(a, r: int = 200, wait: float = 240) -> float:
                 raise
             print(f"  no video ({str(e).splitlines()[0][:80]}); waiting for the camera", flush=True)
             time.sleep(10)
-    return sum(tenengrad(f, w, w // 2, h // 2, r) for f in frames) / len(frames)
+    x, y, rr = roi_box(w, h, getattr(a, "roi", None), r)
+    return sum(tenengrad(f, w, x, y, rr) for f in frames) / len(frames)
 
 
 def focus_offset(a, tag: str = "fo", verbose: bool = True) -> tuple[list[float], float]:
