@@ -47,7 +47,7 @@ class Printer:
                 self.line(item.t, d, f"junk {item.data.hex(' ')}")
 
     def frame(self, t: int, d: str, data: bytes) -> None:
-        k = codec.key(data, strict_a5=True)  # show A5 body changes
+        k = codec.key(data, strict_a5=True)  # show A5 clock/gain changes, not focus-value jitter
         if self.collapse and k == self.last_key.get(d):
             self.repeat[d] += 1
             return
@@ -365,7 +365,7 @@ def build_parser() -> argparse.ArgumentParser:
     f.add_argument("--time-tolerance", type=positive, default=150.0,
                    help="allowed difference in segment span and spacing, ms (default 150)")
     f.add_argument("--strict-a5", action="store_true",
-                   help="compare A5 frame bytes 0-6, not just their presence and cadence")
+                   help="compare A5 frames' seconds, day/night and gain, not just their presence and cadence")
     f.add_argument("--ignore-edges", action="store_true",
                    help="drop unmatched runs at the capture ends (for --strict-a5)")
     f.set_defaults(func=cmd_diff)

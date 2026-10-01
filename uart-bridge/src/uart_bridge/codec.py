@@ -5,23 +5,29 @@ observed and nothing more. Update it as captures confirm fields, and keep
 `key()` in sync: diff.py compares captures by `key()`, so it has to drop every
 byte that changes without a change in meaning.
 
-Camera -> PTZ, A5 frames (stock firmware sends them at 20/s even when idle):
+Camera -> PTZ, A5 frames: the camera's image statistics, 20/s even when idle.
+Decoded from the code that sends them, libXmAuto.so xmaf_value_thread_create()
+in the stock firmware (000529B2, 2021-03-03), and checked against every
+captured frame (decode/encode round-trips byte for byte):
 
     byte 0   0xA5 sync
-    byte 1   counter ^ 0x25; the counter increments once per second
-             (confirmed: consecutive values differ by exactly n ^ (n+1),
-             and 0x1a -> 0x65 is the 0x3f -> 0x40 carry)
-    byte 2   data, not a constant: 9E for hours, then 92 without a reboot;
-             churns (9F 9D 93 90 91 96) in the first minute after boot
-    byte 3-6 change with the counter through a non-linear scramble (not a
-             plain XOR with it); not decoded yet
-    byte 6   bits 1..0 also flip for single frames between counter steps,
-             so they carry live state on top of the scramble
-    byte 7   different in every frame, even with bytes 0-6 unchanged;
-             not a sum or XOR of bytes 0-6
+    byte 1   ((sec ^ 0x25) & 0x7F) | 0x80 at night; sec is the low byte of
+             the camera clock's gettimeofday() seconds
+    byte 2   AG[15:8] ^ 0x9A           AG = sensor analog gain, the low 16
+                                         bits of ISP_EXP_INFO_S.u32AGain
+                                         (22.10 fixed point, 0x400 = 1x)
+    byte 3   (k - b2) ^ AG[7:0]  ^ 0x65    with k = (b1 - 1) & 0xFF
+    byte 4   (k - b3) ^ FV[31:24] ^ 0x65   FV = XM_AF_ValueGet(): the ISP's
+    byte 5   (k - b4) ^ FV[23:16] ^ 0x65    17x15 focus-statistic zones,
+    byte 6   (k - b5) ^ FV[15:8]  ^ 0x65    weighted by an AF window table,
+    byte 7   (k - b6) ^ FV[7:0]   ^ 0x65    horizontal and vertical blended
 
-    The PTZ board does not answer A5 frames, including xm-uart's init[]
-    (a5 7b 9e f0 ef ee e0 f4), which is from the same family.
+    So bytes 3-5 change only when the second (or the gain) does, and the low
+    bytes of the focus value change in every frame. A queued command frame
+    (C5..., or the C5 02 C5 x y w h 5C person-rectangle frame) is sent in an
+    A5 slot instead. The PTZ board does not answer A5 frames, and on the
+    85H50AI it does not act on them either (PROTOCOL.md, "The camera's A5
+    stream").
 
 Camera -> PTZ, XM Pelco-D variant: see xm-uart/PROTOCOL.md for the full
 spec and the captures behind it. In short:
@@ -36,14 +42,18 @@ spec and the captures behind it. In short:
     of their Pelco-D names; see PROTOCOL.md "Focus direction")
           (03 set preset, 05 clear preset, 07 goto preset, 25 zoom speed, ...)
 
-PTZ -> camera:
+PTZ -> camera (what the stock firmware's AFCommProc() does with each type):
 
     EF 01 type len payload[len]
-    type 00, len 09: 04 03 2F 2E + ASCII "X<zoom> ", ~every 225 ms while
-             the zoom moves; the camera overlays it on the OSD
-    type 00, len 0A: 04 03 2F 2E + six spaces, ~6.7 s after the last zoom
-             report (reads like "erase the ratio text"; effect unverified)
-    type 02, len 1: 01 night, 00 day (per the old xm-uart; not observed)
+    type 00: OSD text at payload[1..2] (x, y halves); payload 04 03 2F 2E +
+             ASCII "X<zoom> ", ~every 225 ms while the zoom moves, then six
+             spaces ~6.7 s after the last report to erase it
+    type 01: OSD text, a fixed string
+    type 02, len 1: IR-cut filter, 00 / 01 (the firmware's "afc_dnc")
+    types 04, 05, 06: pan, tilt, zoom position (two bytes), stored by the
+             camera as Pelco-D responses FF 01 00 59 / 5B / 54 + the bytes
+    types 08, 09: the board's AF-controller and PTZ firmware versions
+    (types 01-09 are from the firmware's code; only 00 has been seen)
 """
 
 from __future__ import annotations
@@ -67,7 +77,29 @@ def checksum(frame: bytes) -> int:
 
 
 def counter(frame: bytes) -> int:
-    return frame[1] ^ COUNTER_XOR
+    """An A5 frame's seconds, mod 128 (byte 1 without its night bit)."""
+    return (frame[1] & 0x7F) ^ COUNTER_XOR
+
+
+def a5_values(frame: bytes) -> tuple[int, bool, int, int]:
+    """(seconds mod 128, night, analog gain, focus value) of an A5 frame."""
+    b = frame
+    k = (b[1] - 1) & 0xFF
+    gain = ((b[2] ^ 0x9A) << 8) | (b[3] ^ 0x65 ^ ((k - b[2]) & 0xFF))
+    fv = 0
+    for i in range(4, 8):
+        fv = (fv << 8) | (b[i] ^ 0x65 ^ ((k - b[i - 1]) & 0xFF))
+    return counter(b), bool(b[1] & 0x80), gain, fv
+
+
+def a5_frame(sec: int, night: bool, gain: int, fv: int) -> bytes:
+    """Build an A5 frame as the stock firmware does (inverse of a5_values)."""
+    b = [SYNC, ((sec ^ COUNTER_XOR) & 0x7F) | (0x80 if night else 0), ((gain >> 8) & 0xFF) ^ 0x9A]
+    k = (b[1] - 1) & 0xFF
+    b.append(((k - b[2]) & 0xFF) ^ (gain & 0xFF) ^ 0x65)
+    for shift in (24, 16, 8, 0):
+        b.append(((k - b[-1]) & 0xFF) ^ ((fv >> shift) & 0xFF) ^ 0x65)
+    return bytes(b)
 
 
 @dataclass
@@ -78,9 +110,9 @@ class Decoded:
 
 
 def _a5(frame: bytes) -> Decoded:
-    f = {"counter": counter(frame), "b2": frame[2],
-         "body": frame[3:7].hex(" "), "tail": frame[7]}
-    return Decoded(True, f, f"xm n={f['counter']:02x} b2={frame[2]:02x} body={f['body']} tail={frame[7]:02x}")
+    sec, night, gain, fv = a5_values(frame)
+    f = {"counter": sec, "night": night, "gain": gain, "fv": fv}
+    return Decoded(True, f, f"stats s={sec:3d} {'night' if night else 'day'} gain={gain / 1024:.2f}x fv={fv}")
 
 
 def _pelco(frame: bytes) -> Decoded:
@@ -133,12 +165,15 @@ def decode(frame: bytes) -> Decoded:
 def key(frame: bytes, strict_a5: bool = False) -> str:
     """What a frame means, as far as we know.
 
-    An A5 frame's bytes 1-6 follow a per-second counter whose phase depends on
-    when the camera booted, and the scramble is not decoded, so by default an
-    A5 frame is only its class: diff then checks that the stream is there and
-    its cadence, not its content. `strict_a5` compares bytes 0-6 instead (for
-    captures whose counters run in step); byte 7 changes every frame and is
-    never compared. Other frames are compared whole."""
+    An A5 frame is the camera's clock and live image statistics, which differ
+    between any two captures, so by default it is only its class: diff then
+    checks that the stream is there and its cadence, not its content.
+    `strict_a5` compares its seconds, day/night and gain (for captures whose
+    clocks run in step); the focus value changes in every frame and is never
+    compared. Other frames are compared whole."""
     if len(frame) == 8 and frame[0] == SYNC:
-        return frame[:7].hex(" ") if strict_a5 else "a5"
+        if not strict_a5:
+            return "a5"
+        sec, night, gain, _ = a5_values(frame)
+        return f"a5 s={sec} {'night' if night else 'day'} gain={gain}"
     return frame.hex(" ")

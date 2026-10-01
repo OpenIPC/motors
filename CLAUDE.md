@@ -141,8 +141,9 @@ Ports may be pyserial URLs (`socket://…`); `bridge --tee` and `xm-uart -l` tog
 replay one camera's lens traffic onto a second camera's board, and `TWIN.md` is the
 procedure for comparing two boards that way.
 `codec.py` holds what is known about the three frame types on that link: the
-camera's scrambled `A5 <counter^0x25> …` stream (20 frames/s, the same
-family as `xm-uart`'s `init[]`, never answered by the board), the XM Pelco-D
+camera's `A5` stream (20 frames/s: its clock, day/night, sensor gain and
+autofocus statistic in a chained XOR keyed by the seconds, decoded from the stock
+firmware's `libXmAuto.so`; the board never answers it), the XM Pelco-D
 `C5 … 5C` commands the board does answer, and its `EF 01 type len payload`
 replies (zoom reports `"X1.6 "`). An idle capture has no PTZ→camera bytes;
 that is normal, not a dead link. Keep `codec.key()` consistent with what

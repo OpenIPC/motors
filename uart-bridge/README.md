@@ -66,7 +66,7 @@ The traffic is split into two streams: what the PTZ board received (`c2p` and `h
 
 A capture's first and last segment is cut by the capture itself, so its count and span are not compared.
 
-By default an `A5` frame is compared only as the class `a5`. Its bytes follow a per-second counter whose phase depends on when the camera booted, and the scramble is not decoded yet. The diff therefore checks that the stream is there and keeps its cadence, not what it carries. `--strict-a5` compares bytes 0–6. Combine it with `--ignore-edges` for two captures whose counters run in step. Other frames (Pelco commands, PTZ replies) are always compared byte for byte.
+By default an `A5` frame is compared only as the class `a5`. It carries the camera's clock and live image statistics (decoded in `codec.py`; see `xm-uart/PROTOCOL.md`), which differ between any two captures. The diff therefore checks that the stream is there and keeps its cadence, not what it carries. `--strict-a5` compares the decoded seconds, day/night and gain, never the focus value, which changes every frame. Combine it with `--ignore-edges` for two captures whose clocks run in step. Other frames (Pelco commands, PTZ replies) are always compared byte for byte.
 
 ## Protocol
 
