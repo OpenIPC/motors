@@ -112,6 +112,12 @@ Then, on the lab host:
 uv run scripts/dvrip_twin.py --stock REF --openipc CAM --openipc-http root:PASS --reference
 ```
 
+The default levels zoom in from the wide stop (X1.0 is a zoom-out into it). Add
+`--levels out-X4.0 out-X3.0 out-X2.0 out-X1.5 out-X1.0` to zoom out from the tele
+end as well: an XM board leaves focus much further off after a zoom-out. The `at
++2s` columns are each board's own focus before majestic-af's pass starts, as a
+fraction of that camera's best.
+
 Sharpness is measured at the frame centre, where the zoom goes, so aim both
 cameras at something textured there; a plain wall reads as no sharpness at any
 focus. Otherwise point `--stock-roi` / `--openipc-roi X,Y,R` (fractions of the
@@ -125,4 +131,6 @@ its board's reports on the bridge, so the host must be wired to it; with
 - **Stale lens state.** Compare only after both boards have re-homed. Earlier autofocus runs, or sweeps, leave focus offsets. A zoom mostly resets them (fully on the vendor board, and when zooming out of the wide stop), but the OpenIPC board kept about a fifth of a mid-range offset through a zoom, so a zoom alone is not a clean start.
 - **Relay in `/tmp`.** It's gone after the power cycle that re-homing needs. Install it into the overlay.
 - **Different scenes.** Absolute sharpness numbers aren't comparable between cameras. Compare trends and the positions of peaks, not values.
+- **The OpenIPC reference over 100 % of best.** Its sweep steps focus in 100 ms `/ptz` pulses, and on this board a pulse moves the lens anywhere from nothing to about 200 ms' worth. On a narrow crest the sweep can step over the top, and the camera's own settled picture then reads above its "best". The stock reference injects timed pulses on the lens board's UART and is reliable.
+- **Video sharpness is not the camera's focus statistic.** The harness measures a centre box; majestic-af maximises the ISP's statistic, weighted over 17×15 zones. Where the two disagree (a scene with depth), majestic-af ends where its statistic is highest, and the centre box can read 10–15 % lower.
 - **Killing your own session.** `pkill -f pattern` matches the SSH command line that contains the same pattern. Use `pgrep`/`pkill` on a pattern that isn't in your own command, or kill by PID.

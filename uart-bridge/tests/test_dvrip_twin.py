@@ -159,3 +159,16 @@ def test_levels_and_the_moves_that_reach_them():
     assert D.moves("X3.0") == [("ZoomWide", 6.5), ("ZoomTile", 2.8)]
     # X1.0 is the wide stop itself: settled at X2.0 first, then the zoom-out into it is recorded
     assert D.moves("X1.0") == [("ZoomWide", 6.5), ("ZoomTile", 1.6), ("ZoomWide", 6.5)]
+    # a zoom-out level: settled at the tele end, then the zoom-out (full range less the level's
+    # zoom-in hold) is recorded; out-X1.0 goes into the wide stop
+    assert D.moves("out-X3.0") == [("ZoomWide", 6.5), ("ZoomTile", 6.5), ("ZoomWide", 2.8)]
+    assert D.moves("out-X1.0")[-1] == ("ZoomWide", 6.5)
+    assert set(D.OUT_LEVELS) == {"out-X4.0", "out-X3.0", "out-X2.0", "out-X1.5", "out-X1.0"}
+    assert list(D.IN_LEVELS) == ["X1.0", "X2.0", "X3.0", "X4.0", "X5.0"]   # the default run
+
+
+def test_board_only_is_the_picture_before_the_pass_starts():
+    # stop at 4.0 s: the window is 1.5-2.8 s after it, before majestic-af's pass (3 s)
+    tl = [(t / 10, 100.0 if t < 55 else 50.0 if t <= 68 else 200.0) for t in range(0, 120)]
+    assert D.board_only(tl, 4.0) == 50.0
+    assert D.board_only([(0.0, 1.0)], 4.0) is None
