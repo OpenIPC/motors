@@ -246,15 +246,36 @@ def manual_focus_run(cam: Camera, gate: threading.Barrier) -> dict:
             "moved": bool(s0) and abs(s1 - s0) >= NUDGE_MIN_CHANGE * s0}
 
 
-def reference_stock(cam: StockCamera, levels: dict) -> dict:
+REF_NUDGE_S = 0.1   # a reference that stopped short of the run's zoom goes on by this much
+REF_NUDGES = 4
+
+
+def reference_stock(cam: StockCamera, levels, targets: dict | None = None) -> dict:
     """Best focus per level on the host's own board: zoom by inject, then a
-    focus sweep (xm_tracking's offset experiment). The bridge must be closed."""
+    focus sweep (xm_tracking's offset experiment). The bridge must be closed.
+
+    `targets` is the zoom the run reached at each level. Timed pulses on the wire
+    move the stock lens less than the run's DVRIP holds, which it holds
+    0.10-0.15 s longer (see ZOOM_TOLERANCE): a reference that stopped short goes
+    on the same way in short pulses until the board reports the run's zoom, so
+    it still approaches from the same side."""
     board = T.Board(cam.name, "-", cam.rtsp, cam.roi)
     out = {}
     for lv in levels:
         reports = []
-        for cmd, hold in moves(lv):
+        mv = moves(lv)
+        for cmd, hold in mv:
             reports = board.pulse("ref", A.ZOOM_OUT if cmd == "ZoomWide" else A.ZOOM_IN, hold) or reports
+            time.sleep(1.5)
+        last, target = mv[-1][0], (targets or {}).get(lv)
+        for _ in range(REF_NUDGES):
+            z = reports[-1] if reports else None
+            if target is None or z is None:
+                break
+            short = z - target > 0.05 if last == "ZoomWide" else target - z > 0.05
+            if not short:
+                break
+            reports = board.pulse("ref", A.ZOOM_OUT if last == "ZoomWide" else A.ZOOM_IN, REF_NUDGE_S) or reports
             time.sleep(1.5)
         time.sleep(T.SETTLE_S)
         out[lv] = {"reached": reports[-1] if reports else None, **board.focus_offset()}
@@ -464,7 +485,8 @@ def main() -> None:
         refs: dict = {}
         if not a.no_bridge:
             try:
-                refs[names[0]] = reference_stock(cams[0], levels)
+                refs[names[0]] = reference_stock(
+                    cams[0], levels, {lv: r.get(names[0], {}).get("zoom") for lv, r in report["levels"].items()})
             except (Exception, SystemExit) as e:
                 refs[names[0]] = {"error": f"{type(e).__name__}: {e}"}
             # The sweeps leave the lens at the last level and off focus.
