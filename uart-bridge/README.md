@@ -92,3 +92,11 @@ boards at once (`--board NAME PTZ RTSP`, repeatable): focus while and after a zo
 where it settles against the sharpest point, combined and interleaved zoom/focus
 frames, backlash, and whether the camera's `A5` stream feeds an autofocus loop. The
 results are in `xm-uart/PROTOCOL.md`, "Zoom tracking inside the board".
+
+`scripts/dvrip_twin.py` drives the stock camera and an OpenIPC sibling with the
+same DVRIP PTZ commands through python-dvr, in lockstep. At each zoom level it
+compares the zoom reached, when each picture stopped changing, how sharp it
+settled (with `--reference`, against each camera's own best focus), and when
+majestic-af's after-zoom pass finished. It also checks that a manual focus nudge
+is not followed by an autofocus pass. The OpenIPC camera needs majestic with
+DVRIP PTZ (netip `OPPTZControl`); see TWIN.md, "Driving both cameras over DVRIP".
