@@ -45,7 +45,7 @@ spec and the captures behind it. In short:
 PTZ -> camera (what the stock firmware's AFCommProc() does with each type):
 
     EF 01 type len payload[len]
-    type 00: OSD text at payload[1..2] (x, y halves); payload 04 03 2F 2E +
+    type 00: OSD text at (payload[2], payload[3]) x2; payload 04 03 2F 2E +
              ASCII "X<zoom> ", ~every 225 ms while the zoom moves, then six
              spaces ~6.7 s after the last report to erase it
     type 01: OSD text, a fixed string
@@ -147,8 +147,10 @@ def _reply(frame: bytes) -> Decoded:
         f["erase"] = True
         text = f"reply type={typ:02x} zoom report blank"
     elif typ == 0x02 and n == 1:
-        f["night"] = payload[0] == 1
-        text = f"reply {'night' if payload[0] == 1 else 'day' if payload[0] == 0 else payload.hex()}"
+        # IR-cut filter command ("afc_dnc" in the stock firmware). Which way 00
+        # and 01 move the filter is not known, so report the value as sent.
+        f["ircut"] = payload[0]
+        text = f"reply ir-cut {payload[0]:02x}"
     return Decoded(True, f, text)
 
 
