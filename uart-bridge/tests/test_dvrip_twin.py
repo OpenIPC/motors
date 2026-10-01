@@ -151,3 +151,11 @@ def test_roi_box_stays_inside_the_frame():
     assert A.parse_roi("0.5,0.4,0.1") == (0.5, 0.4, 0.1)
     with pytest.raises(Exception):
         A.parse_roi("0.5,1.2,0.1")
+
+
+def test_levels_and_the_moves_that_reach_them():
+    assert list(D.LEVELS)[0] == "X1.0" and "X5.0" in D.LEVELS
+    # a zoom-in level: into the wide stop, then the measured zoom-in, which is recorded
+    assert D.moves("X3.0") == [("ZoomWide", 6.5), ("ZoomTile", 2.8)]
+    # X1.0 is the wide stop itself: settled at X2.0 first, then the zoom-out into it is recorded
+    assert D.moves("X1.0") == [("ZoomWide", 6.5), ("ZoomTile", 1.6), ("ZoomWide", 6.5)]
