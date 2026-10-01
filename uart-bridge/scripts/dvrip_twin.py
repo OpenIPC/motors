@@ -184,7 +184,11 @@ def manual_focus_run(cam: Camera, gate: threading.Barrier) -> dict:
     """A focus nudge by hand: the picture changes, and no autofocus pass may
     follow it (it would undo what the operator just did). The status is polled
     through the whole 15 s, so a pass that starts and ends between two
-    samples is still seen."""
+    samples is still seen. A pass still running from the last zoom is waited
+    out first, so its finishing is not taken for a refocus."""
+    t = time.monotonic()
+    while cam.af_status() == "running" and time.monotonic() - t < 40:
+        time.sleep(0.5)
     before = cam.af_status()
     gate.wait()
     s0 = cam.sharpness()
@@ -219,7 +223,12 @@ def reference_openipc(cam: OpenIpcCamera, levels: dict) -> dict:
         wait_af(cam, cam.af_status(), time.monotonic(), 40)
         before = cam.af_status()
         cam.dvrip.step("ZoomTile", hold=hold, settle=0)
-        wait_af(cam, before, time.monotonic(), 40)   # majestic-af's own pass first
+        # majestic-af's own pass first: a sweep that overlapped it would record
+        # the pass's moves as well as its own.
+        af, af_s = wait_af(cam, before, time.monotonic(), 40)
+        if af_s is None or not str(af).startswith("done"):
+            out[lv] = {"reached": cam.zoom(), "error": f"the after-zoom pass did not finish ({af})"}
+            continue
         # Far side first, past the crest; the sweep then crosses it going near.
         cam.dvrip.step("FocusFar", hold=1.5, settle=0.5)
         curve = []
@@ -418,8 +427,8 @@ def main() -> None:
                 if not (best and final):
                     continue
                 z, rz = r[n].get("zoom"), ref.get("reached")
-                if z is not None and rz is not None and abs(z - rz) > 0.1 + 1e-9:
-                    r[n]["ref_zoom_mismatch"] = rz
+                if z is None or rz is None or abs(z - rz) > 0.1 + 1e-9:
+                    r[n]["ref_zoom_mismatch"] = rz   # None: the sweep's zoom is unknown
                     continue
                 r[n]["of_best"] = round(final / best, 2)
         out.write_text(json.dumps(report))
