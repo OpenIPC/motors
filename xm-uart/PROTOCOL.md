@@ -307,6 +307,7 @@ These are in [`captures/`](captures/), in the `uart-bridge` JSONL format. Replay
 | `dvrip-twin.json` | first `dvrip_twin.py --reference` run: stock vs OpenIPC over DVRIP, zoom-in to X2.0–X5.0 |
 | `dvrip-twin-inout-before.json` | `dvrip_twin.py --reference` with zoom-in and zoom-out levels, majestic-af #17; the stock references give its % of best after a zoom-out |
 | `dvrip-twin-inout-after.json` | the same levels without references, majestic-af #18 (zoom-out bounce, stopped landing check) |
+| `dvrip-twin-out-ref.json` | `out-X2.0` and `out-X4.0` with references, majestic-af #18: stock at 2 % and 42 % of best after a zoom-out |
 | `tracking-offset.json` | per board, X2.0–X5.0 reached by zoom alone: settled sharpness and a focus sweep through the crest (`offset`) |
 | `tracking-settle.json` | sharpness after the zoom stop, plain, with stop frames, and with a focus nudge during the settle (`settle`) |
 | `tracking-combined.json` | frames with zoom and focus bits together, against zoom alone (`combined`) |
