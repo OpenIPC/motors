@@ -62,13 +62,35 @@ QUIET_S = 12.0    # after the zoom-out, before the next zoom-in
 # the wide stop itself, so it is reached the way a zoom-out reaches it: settled
 # at X2.0 first, then one zoom-out into the stop.
 WIDE_LEVEL = "X1.0"
-LEVELS = {WIDE_LEVEL: None, **T.LEVELS}
+IN_LEVELS = {WIDE_LEVEL: None, **T.LEVELS}
+# Zoom-out levels: settled at the tele end (X5.0) first, then one zoom-out held for the full
+# range less the level's zoom-in hold. A zoom-out drives focus the other way through the board's
+# tracking, so it can land differently from a zoom-in to the same ratio. out-X1.0 goes into the
+# wide stop.
+FULL_S = 5.6   # the whole zoom range, wide stop to tele end
+OUT_LEVELS = {f"out-{lv}": round(FULL_S - hold, 1) for lv, hold in T.LEVELS.items() if lv != "X5.0"}
+OUT_LEVELS["out-X1.5"] = 4.8
+OUT_LEVELS["out-X1.0"] = T.WIDE_S
+LEVELS = {**IN_LEVELS, **OUT_LEVELS}
 
 
 def moves(level: str) -> list[tuple[str, float]]:
     if level == WIDE_LEVEL:
         return [("ZoomWide", T.WIDE_S), ("ZoomTile", T.LEVELS["X2.0"]), ("ZoomWide", T.WIDE_S)]
+    if level in OUT_LEVELS:
+        return [("ZoomWide", T.WIDE_S), ("ZoomTile", T.LEVELS["X5.0"]), ("ZoomWide", OUT_LEVELS[level])]
     return [("ZoomWide", T.WIDE_S), ("ZoomTile", T.LEVELS[level])]
+
+
+BOARD_ONLY_S = (1.5, 2.8)   # after the stop, before majestic-af's pass starts (zoom_settle_ms, 3 s)
+
+
+def board_only(tl: list[tuple[float, float]], stop_at: float) -> float | None:
+    """Median sharpness in BOARD_ONLY_S after the stop: where the lens board's own tracking left
+    focus, before any camera-side autofocus moved it."""
+    lo, hi = BOARD_ONLY_S
+    xs = [s for t, s in tl if stop_at + lo <= t <= stop_at + hi]
+    return round(statistics.median(xs), 1) if xs else None
 
 
 class Camera:
@@ -189,6 +211,7 @@ def level_run(cam: Camera, level: str, gate: threading.Barrier, stamp: str) -> d
     # sweep's best is in; the timeline (smaller, for timing) is not comparable.
     return {"cmd_at": cmd_at, "stop_at": stop_at, "zoom": cam.zoom(), "af": af, "af_done_s": af_s,
             "settled": settled(tl), "settle_s": settle_time(tl, stop_at), "final_sharp": cam.sharpness(),
+            "board_only": board_only(tl, stop_at),
             "video": out.name, "sharp": tl}
 
 
@@ -358,16 +381,16 @@ def verdict(report: dict, names: tuple[str, str]) -> tuple[list[str], list[str]]
 
 def table(report: dict, names: tuple[str, str]) -> str:
     stock, oip = names
-    rows = [f"{'level':6s} {'zoom ' + stock:>12s} {'zoom ' + oip:>12s} "
+    rows = [f"{'level':8s} {'zoom ' + stock:>12s} {'zoom ' + oip:>12s} "
             f"{stock + ' %best':>13s} {oip + ' %best':>13s} {stock + ' settle':>13s} "
-            f"{oip + ' settle':>13s} {oip + ' AF':>10s}"]
+            f"{oip + ' settle':>13s} {oip + ' AF':>10s} {'at +2s: ' + stock:>15s} {oip:>8s}"]
     for lv, r in report["levels"].items():
         a, b = r.get(stock, {}), r.get(oip, {})
-        pct = lambda x: f"{x['of_best']:.0%}" if x.get("of_best") is not None else "-"
+        pct = lambda x, k="of_best": f"{x[k]:.0%}" if x.get(k) is not None else "-"
         sec = lambda v: f"{v}s" if v is not None else "-"
-        rows.append(f"{lv:6s} {str(a.get('zoom')):>12s} {str(b.get('zoom')):>12s} {pct(a):>13s} "
+        rows.append(f"{lv:8s} {str(a.get('zoom')):>12s} {str(b.get('zoom')):>12s} {pct(a):>13s} "
                     f"{pct(b):>13s} {sec(a.get('settle_s')):>13s} {sec(b.get('settle_s')):>13s} "
-                    f"{sec(b.get('af_done_s')):>10s}")
+                    f"{sec(b.get('af_done_s')):>10s} {pct(a, 'board_of_best'):>15s} {pct(b, 'board_of_best'):>8s}")
     return "\n".join(rows)
 
 
@@ -385,7 +408,8 @@ def main() -> None:
     p.add_argument("--stock-roi", type=A.parse_roi, metavar="X,Y,R",
                    help="where to measure sharpness, as fractions of the frame (default: the centre)")
     p.add_argument("--openipc-roi", type=A.parse_roi, metavar="X,Y,R")
-    p.add_argument("--levels", nargs="+", default=list(LEVELS), choices=list(LEVELS))
+    p.add_argument("--levels", nargs="+", default=list(IN_LEVELS), choices=list(LEVELS),
+                   help="default: the zoom-in levels; the out-X* levels zoom out from X5.0")
     p.add_argument("--reference", action="store_true", help="also sweep focus per level for each camera's best")
     p.add_argument("--no-bridge", action="store_true",
                    help="this host is not wired to the stock board: no stock zoom or reference")
@@ -480,6 +504,11 @@ def main() -> None:
                     r[n]["ref_zoom_mismatch"] = rz   # None: the sweep's zoom is unknown
                     continue
                 r[n]["of_best"] = round(final / best, 2)
+                # The board's own landing, on the timeline's scale as a fraction of the settled
+                # picture, then of the best.
+                bo, st = r[n].get("board_only"), r[n].get("settled")
+                if bo and st:
+                    r[n]["board_of_best"] = round(final / best * bo / st, 2)
         out.write_text(json.dumps(report))
     print(table(report, names))
     fails, flags = verdict(report, names)
