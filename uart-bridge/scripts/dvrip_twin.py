@@ -152,9 +152,12 @@ def level_run(cam: Camera, level: str, hold: float, gate: threading.Barrier, sta
     time.sleep(max(0.0, t_wide + QUIET_S - time.monotonic()))
     before = cam.af_status()
     out = A.CAPTURES / f"dvrip-twin-{stamp}-{cam.name}-{level}.mkv"
-    gate.wait()                                   # both zooms start together
     rec = T.Recording(cam.rtsp, out, OBSERVE_S, cam.name)
     try:
+        # Both recordings are running before either zoom starts (an RTSP stream
+        # can take a second or more to start): the zooms start together, each
+        # at least 2 s into its own video.
+        gate.wait()
         time.sleep(max(0.0, rec.t0 + 2.0 - time.monotonic()))
         cmd_at = rec.elapsed()
         cam.dvrip.mark(f"{level}: zoom in {hold} s")
@@ -291,6 +294,9 @@ def verdict(report: dict, names: tuple[str, str]) -> tuple[list[str], list[str]]
     for n, m in report.get("manual", {}).items():
         if "error" in m:
             fails.append(f"manual focus {n}: {m['error']}")
+    for n, m in report.get("restore", {}).items():
+        if "error" in m:
+            fails.append(f"final zoom-out {n}: {m['error']}")
     m = report.get("manual", {}).get(oip, {})
     if m.get("refocused"):
         flags.append(f"{oip} refocused after a manual focus nudge")
@@ -373,7 +379,8 @@ def main() -> None:
         # The manual check left both lenses defocused on purpose. Zooming into the
         # wide stop puts the stock board's focus back on its curve, and books
         # majestic-af an after-zoom pass on the OpenIPC camera.
-        in_parallel(cams, lambda cam: cam.dvrip.step("ZoomWide", hold=T.WIDE_S, settle=0))
+        report["restore"] = in_parallel(cams, lambda cam: cam.dvrip.step("ZoomWide", hold=T.WIDE_S, settle=0)
+                                        or {})
     finally:
         for c in cams:
             c.close()

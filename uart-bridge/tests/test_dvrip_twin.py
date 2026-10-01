@@ -131,6 +131,7 @@ def test_verdict_does_not_pass_what_it_did_not_measure():
     # errors in the manual check or the reference fail the run
     base = {"levels": {"X2.0": {"stock": {"zoom": 2.2}, "openipc": {"zoom": 2.2, **ok}}}}
     assert D.verdict({**base, "manual": {"stock": {"error": "boom"}}}, names)[0]
+    assert D.verdict({**base, "restore": {"openipc": {"error": "timed out"}}}, names)[0]
     assert D.verdict({**base, "reference": {"stock": {"X2.0": {"error": "flat"}}}}, names)[0]
     assert D.verdict({**base, "reference": {"openipc": {"error": "HTTP 500"}}}, names)[0]
     # a nudge that did not change the picture makes the no-refocus check inconclusive
