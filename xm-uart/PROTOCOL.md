@@ -23,7 +23,7 @@ Test rig: XM **HI3516EV300_85H50AI** camera, stock firmware V5.00.R02.000529B2, 
 ## Traffic at a glance
 
 ```
-camera ──► board   A5 xx xx xx xx xx xx xx   8 B, every 50 ms, always (camera heartbeat/state stream)
+camera ──► board   A5 xx xx xx xx xx xx xx   8 B, every 50 ms, always: clock, day/night, gain, focus statistic
 camera ──► board   C5 01 c1 c2 d1 d2 ck 5C   8 B, once per user action, replaces one A5 slot
 board  ──► camera  EF 01 tt ll <ll bytes>    zoom-ratio reports while zooming, then a blank one
 ```
@@ -142,7 +142,12 @@ EF 01 type len payload[len]
 |---|---|---|---|
 | `00` | `09` | `04 03 2F 2E` + ASCII `"X1.4 "` | **Zoom report**, sent about every 225 ms while the zoom moves plus one more after stop. The camera draws it on the video OSD (bottom right). (**verified**) |
 | `00` | `0A` | `04 03 2F 2E` + six spaces | Sent about 6.7 s after the last zoom report (**verified**). It reads like an "erase the ratio text" message, but the camera's OSD went on showing the last ratio in later snapshots, so what the camera does with it is **unverified**. |
-| `02` | `01` | `01` night / `00` day | from the old xm-uart; **unverified**, never seen during these tests |
+| `01` | | OSD position + a fixed string | the stock firmware draws a built-in string at payload bytes 2–3 (×2) (from the code; not seen) |
+| `02` | `01` | `00` / `01` | **IR-cut filter** (`afc_dnc`, day/night control): the camera moves its IR-cut filter one way or the other (from the code; not seen) |
+| `04`, `05`, `06` | | two bytes | **pan, tilt, zoom position** (`ack pan`, `ack title` [sic], `ack zoom`): the camera stores them as Pelco-D position responses (`FF 01 00 59` / `5B` / `54` + the two bytes), answers to a position query (from the code; not seen) |
+| `08`, `09` | | version bytes | the board's AF-controller and PTZ firmware versions (`AFC_SUP_VERSION`, `AFC_PTZ_VERSION`) (from the code; not seen) |
+
+What the camera does with each type is from the stock firmware's receiver, `AFCommProc()` in `libXmAuto.so` (see *The camera's A5 stream*). For type `00` it draws the text (payload from byte 4) on the OSD at payload bytes 2–3 ×2, so `04 03 2F 2E` is "OSD text, at (94, 92)".
 
 The camera keeps showing the **last report it received**. Commands sent to the board with the camera cut out of the link leave the camera's OSD, and its idea of the zoom, stale: the OSD read X2.5 over a lens that was back at X1.2. It corrects itself at the next zoom movement it sees.
 
@@ -152,17 +157,29 @@ Replies arrive split across reads, often one byte at a time, so a receiver has t
 
 ## The camera's A5 stream (camera → board)
 
-The camera sends `A5 xx xx xx xx xx xx xx` every 50 ms from boot, whether or not anything is connected.
+The camera sends its **clock, day/night state, sensor gain and autofocus statistic** to the board as `A5 xx xx xx xx xx xx xx`, every 50 ms from boot, whether or not anything is connected. A queued command frame (`C5 …`) goes out in an `A5` slot instead.
 
-| byte | Meaning |
-|---|---|
-| 0 | `A5` |
-| 1 | `counter ^ 0x25`; the counter increments once per second (**verified**: consecutive values differ by exactly `n ^ (n+1)`) |
-| 2 | **data, not a constant**: `9E` for hours, then `92` with no reboot in between; it cycles through `9F 9D 93 90 91 96` in the first minute after boot, then settles (**verified**, `e13`) |
-| 3–6 | scrambled together with the counter, not decoded. The two low bits of byte 6 change every frame for about 2 s after the camera receives zoom reports. |
-| 7 | different in every frame, even with bytes 0–6 unchanged; not a sum or XOR of bytes 0–6 |
+This is decoded from the code that sends it, not inferred from the wire. In the stock firmware (`000529B2`, build 2021-03-03, the rig's own build; [OpenIPC/xmupdates](https://github.com/OpenIPC/xmupdates) catalog id 1873) the sender is `xmaf_value_thread_create()` in `/usr/lib/libXmAuto.so`. Every one of the 14,705 `A5` frames in the captures below decodes and re-encodes byte for byte (**verified**; `uart_bridge.codec.a5_values()` / `a5_frame()`).
 
-**The board shows no observable reaction to it.** It never answers, zoom and focus stay put, and a defocused lens is **not** refocused while the stream runs (15 s watched). Focus is nevertheless held through a zoom (sharpness unchanged from X2.4 to X3.2), which points to zoom/focus tracking inside the board. Whether the stream carries anything the board uses is open. The old xm-uart sent one such frame (`a5 7b 9e f0 ef ee e0 f4`) as an "init". That frame is from this stream, and the board accepts it as a complete frame and ignores it, so it has been removed.
+```
+b0 = A5
+b1 = ((sec ^ 0x25) & 0x7F) | 0x80 at night   sec = low byte of the camera clock's seconds
+b2 = AG[15:8] ^ 0x9A                         AG = sensor analog gain (ISP_EXP_INFO_S.u32AGain,
+k  = (b1 - 1) & 0xFF                              22.10 fixed point, 0x400 = 1x), low 16 bits
+b3 = ((k - b2) & 0xFF) ^ AG[7:0]   ^ 0x65
+b4 = ((k - b3) & 0xFF) ^ FV[31:24] ^ 0x65    FV = XM_AF_ValueGet(), 32 bits
+b5 = ((k - b4) & 0xFF) ^ FV[23:16] ^ 0x65
+b6 = ((k - b5) & 0xFF) ^ FV[15:8]  ^ 0x65
+b7 = ((k - b6) & 0xFF) ^ FV[7:0]   ^ 0x65
+```
+
+- **`sec`** is the camera's own clock, not uptime. It continued across a reboot (41 → 81 across a ~40 s outage). Its offset from UTC changed at each reboot, so it is whatever clock the camera set at boot. That is the "counter that increments once per second" of the earlier notes.
+- **Night** sets bit 7 of byte 1, from `XmVideo_PublicApi_getDayNight()`. No capture was taken at night, so this comes from the code alone.
+- **`AG`** explains the old observations of byte 2. "`9E` for hours, then `92`" was the gain going from 1× to 2×. The churn in the first minute after boot is auto-exposure converging: the gain swings between 1× and 2–4× from 24.7 s on in `e13`. Evening captures run at 4–6×.
+- **`FV`** is the autofocus statistic. `XM_AF_ValueGet()` takes the ISP's focus statistics (`HI_MPI_ISP_GetFocusStatistics`, 17×15 zones), weights each zone by an AF window table, and blends the horizontal and vertical measures. Its low bytes change in every frame, which is why byte 7 looked random. It is 0, or a fixed 7724938, before the ISP runs at boot. In `a5-burst-record` it jumped as the zoom began (161k → 187–194k).
+- **The same library builds the board's other inputs.** `xmaf_write_encrypt()` turns the firmware's Pelco-D frames (`FF addr c1 c2 d1 d2 ck`) into the `C5 … 5C` frames (despite its name, no encryption). `xmaf_send_human_rect()` sends the largest person-detection box, scaled to 0–255, as `C5 02 C5 x y w h 5C`; it isn't seen in the captures. And `AFCommProc()` handles the board's replies (*Replies*).
+
+**The 85H50AI board doesn't use the stream for focus (verified).** The lens never refocuses while the stream runs. A stock zoom replayed with and without its `A5` frames ends equally sharp (*Second board*). Stock zooms with the stream live settle almost as far from the crest as host zooms without it (*Zoom tracking inside the board*). Other XM lens boards may be different: the protocol carries a focus statistic, so a board that ran contrast autofocus on it is at least possible. A replacement firmware that wants to look like the stock one can send the same frames with `a5_frame()`. The old xm-uart sent one of them (`a5 7b 9e f0 ef ee e0 f4`: second 94, gain 1.07×) as an "init"; the board ignores it, so it has been removed.
 
 ## Power-up behaviour
 

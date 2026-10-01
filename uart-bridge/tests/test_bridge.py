@@ -256,7 +256,8 @@ def test_codec_decodes_pelco_and_replies():
     assert codec.decode(bytes.fromhex("ef01000a04032f2e202020202020")).text == "reply type=00 zoom report blank"
     r = codec.decode(REPLY)
     assert r.fields["zoom"] == "X1.3" and r.fields["type"] == 0
-    assert codec.decode(bytes.fromhex("ef01020101")).text == "reply night"
+    assert codec.decode(bytes.fromhex("ef01020101")).text == "reply ir-cut 01"
+    assert codec.decode(bytes.fromhex("ef01020101")).fields["ircut"] == 1
 
 
 def test_bridge_probe_waits_for_camera_frame_boundary():
