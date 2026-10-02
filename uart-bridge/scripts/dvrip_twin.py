@@ -25,6 +25,11 @@ at something textured there, or point --stock-roi / --openipc-roi at it.
 
 The OpenIPC camera needs majestic with netip PTZ and netip.enabled, netip.user
 and netip.password (the sofia hash of the DVRIP password) set; see TWIN.md.
+
+--transport onvif drives both lenses over ONVIF instead (onvif_ptz.py): zoom by
+PTZ ContinuousMove and Stop, focus by Imaging continuous Move and Stop, through
+an onvif-tt checkout (--onvif-tt). The stock firmware serves ONVIF on 8899,
+majestic on its web port with its web login.
 Results: captures/dvrip-twin-<time>.json and a table. Exits non-zero when the
 zoom differs by more than 0.2 at any level (see ZOOM_TOLERANCE), or a camera
 fails.
@@ -415,6 +420,24 @@ def table(report: dict, names: tuple[str, str]) -> str:
     return "\n".join(rows)
 
 
+def controller(a, which: str, bridge):
+    """The lens control for camera `which` ("stock" / "openipc") over the chosen
+    transport: anything with step / mark / close."""
+    stock = which == "stock"
+    if a.transport == "onvif":
+        import onvif_ptz
+        if stock:
+            user, pw, port = a.stock_user, a.stock_password, a.stock_onvif_port
+        else:
+            user, _, pw = a.openipc_http.partition(":")
+            port = a.openipc_onvif_port
+        return onvif_ptz.Onvif(argparse.Namespace(onvif_tt=a.onvif_tt, camera=a.stock if stock else a.openipc,
+                                                  port=port, user=user, password=pw), bridge)
+    user, pw = (a.stock_user, a.stock_password) if stock else (a.openipc_user, a.openipc_password)
+    return A.Dvrip(argparse.Namespace(python_dvr=a.python_dvr, camera=a.stock if stock else a.openipc,
+                                      user=user, password=pw), bridge)
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--stock", required=True, metavar="IP", help="the stock XM camera")
@@ -435,6 +458,12 @@ def main() -> None:
     p.add_argument("--no-bridge", action="store_true",
                    help="this host is not wired to the stock board: no stock zoom or reference")
     p.add_argument("--python-dvr", default="~/git/python-dvr")
+    p.add_argument("--transport", choices=("dvrip", "onvif"), default="dvrip",
+                   help="drive both lenses over DVRIP (python-dvr) or ONVIF (PTZ zoom, Imaging focus)")
+    p.add_argument("--onvif-tt", default="~/git/onvif-tt", help="an onvif-tt checkout (for --transport onvif)")
+    p.add_argument("--stock-onvif-port", type=int, default=8899)
+    p.add_argument("--openipc-onvif-port", type=int, default=80,
+                   help="majestic's ONVIF is on its web port; it logs in as --openipc-http")
     a = p.parse_args()
 
     # In the order asked for; a level named twice runs once (the report is keyed by level).
@@ -447,17 +476,15 @@ def main() -> None:
     A.CAPTURES.mkdir(exist_ok=True)
     bridge = None if a.no_bridge else A.Bridge(f"captures/dvrip-twin-{stamp}.jsonl",
                                                 "dvrip_twin: stock camera's lens traffic")
-    report: dict = {"stamp": stamp, "no_bridge": a.no_bridge, "levels": {}, "restore": {}}
+    report: dict = {"stamp": stamp, "no_bridge": a.no_bridge, "transport": a.transport,
+                    "levels": {}, "restore": {}}
     out = A.CAPTURES / f"dvrip-twin-{stamp}.json"
     cams: list[Camera] = []
     try:
         time.sleep(2)
-        dv = lambda ip, user, pw, br: A.Dvrip(argparse.Namespace(python_dvr=a.python_dvr, camera=ip,
-                                                                  user=user, password=pw), br)
-        cams = [StockCamera(names[0], dv(a.stock, a.stock_user, a.stock_password, bridge), stock_rtsp, bridge,
-                            a.stock_roi),
-                OpenIpcCamera(names[1], dv(a.openipc, a.openipc_user, a.openipc_password, None), oip_rtsp,
-                              a.openipc, a.openipc_http, a.openipc_roi)]
+        cams = [StockCamera(names[0], controller(a, "stock", bridge), stock_rtsp, bridge, a.stock_roi),
+                OpenIpcCamera(names[1], controller(a, "openipc", None), oip_rtsp, a.openipc, a.openipc_http,
+                              a.openipc_roi)]
         for lv in levels:
             gate = threading.Barrier(len(cams), timeout=180)
             report["levels"][lv] = in_parallel(cams, level_run, lv, gate, stamp)
@@ -497,10 +524,8 @@ def main() -> None:
                 report["restore"][names[0]] = {"error": f"after the reference: {type(e).__name__}: {e}"}
         ref_cam = None
         try:
-            ref_cam = OpenIpcCamera(
-                names[1], A.Dvrip(argparse.Namespace(python_dvr=a.python_dvr, camera=a.openipc,
-                                                     user=a.openipc_user, password=a.openipc_password)),
-                oip_rtsp, a.openipc, a.openipc_http, a.openipc_roi)
+            ref_cam = OpenIpcCamera(names[1], controller(a, "openipc", None), oip_rtsp, a.openipc,
+                                    a.openipc_http, a.openipc_roi)
             refs[names[1]] = reference_openipc(ref_cam, levels)
         except (Exception, SystemExit) as e:
             refs[names[1]] = {"error": f"{type(e).__name__}: {e}"}
