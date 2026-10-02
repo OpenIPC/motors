@@ -132,6 +132,45 @@ The stock firmware sends Pelco-D extended commands for presets (**stock**). **Th
 
 Presets therefore have to be implemented on the camera side, for example as zoom/focus positions tracked from the zoom reports.
 
+### Driven over ONVIF (stock)
+
+The stock firmware also serves ONVIF: gSOAP on port 8899, ONVIF 16.12, `Manufacturer` `H264`. Its PTZ service (ver20) has one node and one configuration, with these spaces:
+- continuous pan/tilt and zoom velocity −1..1;
+- relative pan/tilt −1..1 and zoom 0..1;
+- speed 1..8;
+- no absolute spaces.
+
+It advertises `DefaultPTZTimeout` PT1S, `HomeSupported`, and 255 presets with no positions. Focus is in the Imaging service (ver20): `GetMoveOptions` offers Continuous Speed −1..1 only. GetStatus in both services always reports position 0 and IDLE/UNKNOWN.
+
+What each call puts on the lens wire, driven from a host with the board's UART captured (`captures/onvif-stock.jsonl.gz`, one mark pair per call) (**verified**):
+
+| ONVIF call | Frame(s) to the board |
+|---|---|
+| PTZ ContinuousMove, Zoom +x / −x | `zoom+` / `zoom-`, once. Speed is ignored (0.2 sends the same frame as 1). It runs until Stop: neither `Timeout` (PT2S ran 3.5 s) nor `DefaultPTZTimeout` ends it. |
+| PTZ ContinuousMove, PanTilt ±x / ±y | `right` / `left` / `up` / `down`, at pan/tilt speed `3F` whatever the velocity |
+| PTZ ContinuousMove, Zoom and PanTilt | the pan frame, then the zoom frame: the zoom is what runs |
+| PTZ ContinuousMove, all zero | nothing |
+| PTZ Stop | `stop`, whatever the PanTilt/Zoom flags (Stop with PanTilt only stopped a zoom); nothing when nothing moves |
+| PTZ RelativeMove, zoom or pan | nothing, though it answers success |
+| Imaging Move, Continuous Speed +s / −s | `focus-near` (cmd2 `80`) / `focus-far` (cmd1 `01`). Speed is ignored; it runs until Stop. |
+| Imaging Stop | `stop` |
+| PTZ GotoHomePosition / GotoPreset *n* | goto-preset 0 / *n* (`C5 01 00 07 00 n`), which the board ignores |
+
+Each frame went out 0.45–0.8 s after the client sent the request (marked just before each call). So over ONVIF, as over DVRIP, the stock firmware only switches the board's moves on and off; it moves nothing by position. It also departs from the ONVIF spec in several places:
+- it ignores Timeout;
+- it puts its PTZ capability attributes in the `tt:` namespace, so no client reads them;
+- it accepts SetConfiguration for a token that doesn't exist;
+- it closes the connection on an invalid node or video-source token instead of returning a fault.
+
+onvif-tt marks those `xfail` for `Manufacturer` `H264`.
+
+majestic answers the same calls the same way, through the AF plugin's verbs (`src/onvif/ptz.c`). It deliberately differs in these ways:
+- it honours an explicit `Timeout`, as ONVIF requires, within the advertised `PTZTimeout` of PT1S–PT120S; one outside that range is a `ter:InvalidTimeout` fault;
+- with no `Timeout`, a move runs for `DefaultPTZTimeout`. That is 120 s by default, the same cap a move with no stop has, so it runs until Stop as on stock. SetConfiguration can change it, and majestic keeps it in its config (`onvif.ptzTimeoutMs`);
+- a velocity outside −1..1, or one missing its coordinates, is a fault rather than a move. A zero velocity stops only a move of its own kind: PTZ for pan, tilt or zoom, Imaging for focus;
+- it offers no relative spaces, presets or home, and answers those calls with `ter:ActionNotSupported`;
+- it returns proper faults for invalid tokens.
+
 ## Replies (board → camera)
 
 ```
@@ -315,6 +354,8 @@ These are in [`captures/`](captures/), in the `uart-bridge` JSONL format. Replay
 | `dvrip-twin.json` | first `dvrip_twin.py --reference` run: stock vs OpenIPC over DVRIP, zoom-in to X2.0–X5.0 |
 | `dvrip-twin-inout-before.json` | `dvrip_twin.py --reference` with zoom-in and zoom-out levels, majestic-af #17; the stock references give its % of best after a zoom-out |
 | `dvrip-twin-inout-after.json` | the same levels without references, majestic-af #18 (zoom-out bounce, stopped landing check) |
+| `onvif-stock.jsonl.gz` | the stock firmware driven over ONVIF (PTZ and Imaging calls, one mark pair per call); see *Driven over ONVIF* |
+| `onvif-twin-ref.json` | `dvrip_twin.py --transport onvif --reference`, all zoom-in and zoom-out levels: both cameras driven over ONVIF, OpenIPC on majestic's PTZ service |
 | `dvrip-twin-out-ref.json` | `out-X2.0` and `out-X4.0` with references, majestic-af #18: stock at 2 % and 42 % of best after a zoom-out |
 | `tracking-offset.json` | per board, X2.0–X5.0 reached by zoom alone: settled sharpness and a focus sweep through the crest (`offset`) |
 | `tracking-settle.json` | sharpness after the zoom stop, plain, with stop frames, and with a focus nudge during the settle (`settle`) |

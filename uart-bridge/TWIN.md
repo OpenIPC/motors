@@ -125,6 +125,26 @@ frame) at texture that stays in view at tele. The stock camera's zoom comes from
 its board's reports on the bridge, so the host must be wired to it; with
 `--no-bridge` the run still compares sharpness and timing.
 
+## 7. Driving both cameras over ONVIF
+`dvrip_twin.py --transport onvif` runs the same comparison with the lenses driven over ONVIF instead of DVRIP:
+- zoom by PTZ ContinuousMove and Stop;
+- focus by Imaging continuous Move and Stop.
+
+That is how an ONVIF client drives both firmwares (xm-uart/PROTOCOL.md, *Driven over ONVIF*).
+
+What it needs:
+- **majestic** with the ONVIF PTZ service and ONVIF enabled (the default). It logs in with the web credentials, `--openipc-http`, on the web port (`--openipc-onvif-port`, 80).
+- **The stock firmware's ONVIF** on 8899 (`--stock-onvif-port`), with `--stock-user` / `--stock-password`.
+- **An onvif-tt checkout** for the SOAP side (`--onvif-tt`), and its Python dependencies for the run:
+
+```sh
+uv run --with zeep --with onvif-zeep --with lxml --with pytest --with pydantic --with WSDiscovery \
+    scripts/dvrip_twin.py --transport onvif --onvif-tt ~/onvif-tt \
+    --stock REF --openipc CAM --openipc-http root:PASS --reference
+```
+
+The netip settings aren't needed for this transport.
+
 ## Pitfalls (all hit in the lab)
 - **Two readers on the lens tty.** See step 1.
 - **Unequal starting focus.** An XM board refocuses by itself after every zoom, from its tracking; the reference camera's traffic adds nothing to that, so replaying the `A5` stream or not makes no difference. Each zoom puts focus back on the board's own curve (a manual offset is mostly lost), but the curve itself can differ between lenses, so compare from the same starting state anyway. Allow ~10 s after a zoom stop before measuring: the board can make a last focus move that late.
