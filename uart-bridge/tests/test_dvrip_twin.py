@@ -218,6 +218,7 @@ class FakeOnvifDut:
 
     def __init__(self):
         self.calls = []
+        self.fail_on = None
         dut = self
 
         class Svc:
@@ -232,9 +233,14 @@ class FakeOnvifDut:
                     dut.calls.append((self.name, op, req, time.monotonic()))
                     if op == "GetProfiles":
                         return [argparse.Namespace(token="P0", PTZConfiguration=None),
-                                argparse.Namespace(token="P1", PTZConfiguration=object())]
+                                argparse.Namespace(
+                                    token="P1", PTZConfiguration=object(),
+                                    VideoSourceConfiguration=argparse.Namespace(
+                                        SourceToken="V1"))]
                     if op == "GetVideoSources":
-                        return [argparse.Namespace(token="V0")]
+                        return [argparse.Namespace(token="V0"), argparse.Namespace(token="V1")]
+                    if dut.fail_on == op:
+                        raise RuntimeError(f"{op} answer lost")
                 return call
 
         self.media, self.ptz, self.imaging = Svc("media"), Svc("ptz"), Svc("imaging")
@@ -244,7 +250,8 @@ def test_onvif_steps_are_held_moves_on_the_right_services():
     import onvif_ptz as O
     d = FakeOnvifDut()
     cam = O.Onvif(argparse.Namespace(camera="cam"), dut=d)
-    assert cam.profile == "P1" and cam.source == "V0"  # the profile with a PTZConfiguration
+    # the profile with a PTZConfiguration, and that profile's own video source
+    assert cam.profile == "P1" and cam.source == "V1"
     d.calls.clear()
     cam.step("ZoomWide", hold=0.3, settle=0)
     cam.step("FocusNear", hold=0.2, settle=0)
@@ -254,8 +261,23 @@ def test_onvif_steps_are_held_moves_on_the_right_services():
     assert (s2, op2) == ("ptz", "Stop") and r2["Zoom"] is True
     assert 0.25 <= t2 - t1 <= 1.0
     assert (s3, op3, r3.Focus) == ("imaging", "Move", {"Continuous": {"Speed": 1.0}})
-    assert r3.VideoSourceToken == "V0"
+    assert r3.VideoSourceToken == "V1"
     assert (s4, op4) == ("imaging", "Stop")
+
+
+def test_onvif_failed_start_is_still_stopped():
+    """A start whose answer is lost may still have started the move: Stop goes
+    out anyway."""
+    import onvif_ptz as O
+    d = FakeOnvifDut()
+    cam = O.Onvif(argparse.Namespace(camera="cam"), dut=d)
+    for cmd, start, stop in (("ZoomTile", "ContinuousMove", ("ptz", "Stop")),
+                             ("FocusFar", "Move", ("imaging", "Stop"))):
+        d.calls.clear()
+        d.fail_on = start
+        with pytest.raises(RuntimeError):
+            cam.step(cmd, hold=0.1, settle=0)
+        assert [(s, op) for s, op, _, _ in d.calls][-1] == stop
 
 
 def test_onvif_hold_is_timed_from_the_request():

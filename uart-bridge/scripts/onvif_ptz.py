@@ -47,7 +47,12 @@ class Onvif:
         if not ptz:
             raise SystemExit(f"{a.camera}: no media profile with a PTZConfiguration")
         self.profile = ptz[0].token
-        self.source = self.d.media.GetVideoSources()[0].token
+        # Focus moves the source the zoom's profile shows, not merely the first
+        # one: on a camera with several they can differ.
+        vsc = getattr(ptz[0], "VideoSourceConfiguration", None)
+        self.source = getattr(vsc, "SourceToken", None)
+        if not self.source:
+            self.source = self.d.media.GetVideoSources()[0].token
 
     def _start(self, service: str, sign: float) -> None:
         if service == "ptz":
@@ -77,9 +82,12 @@ class Onvif:
         # firmware can answer a second or more after its frame is on the lens
         # wire (traced: 4.07 s of zoom for a 2.8 s hold timed from the answer),
         # while its start and stop frames lag their requests alike.
+        # The start is inside the try: a request the camera took but whose
+        # answer failed still gets its Stop, which the stock firmware needs (its
+        # moves ignore every timeout).
         t0 = time.monotonic()
-        self._start(service, sign)
         try:
+            self._start(service, sign)
             time.sleep(max(0.0, hold - (time.monotonic() - t0)))
         finally:
             self._stop(service)
