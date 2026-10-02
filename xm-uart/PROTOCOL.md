@@ -165,7 +165,9 @@ Each frame went out 0.45–0.8 s after the client sent the request (marked just 
 onvif-tt marks those `xfail` for `Manufacturer` `H264`.
 
 majestic answers the same calls the same way, through the AF plugin's verbs (`src/onvif/ptz.c`). It deliberately differs in these ways:
-- it honours an explicit `Timeout`, as ONVIF requires; with none, a move runs until Stop, capped at 120 s, which it advertises as `DefaultPTZTimeout`;
+- it honours an explicit `Timeout`, as ONVIF requires, within the advertised `PTZTimeout` of PT1S–PT120S; one outside that range is a `ter:InvalidTimeout` fault;
+- with no `Timeout`, a move runs for `DefaultPTZTimeout`. That is 120 s by default, the same cap a move with no stop has, so it runs until Stop as on stock. SetConfiguration can change it, and majestic keeps it in its config (`onvif.ptzTimeoutMs`);
+- a velocity outside −1..1, or one missing its coordinates, is a fault rather than a move. A zero velocity stops only a move of its own kind: PTZ for pan, tilt or zoom, Imaging for focus;
 - it offers no relative spaces, presets or home, and answers those calls with `ter:ActionNotSupported`;
 - it returns proper faults for invalid tokens.
 
@@ -353,6 +355,7 @@ These are in [`captures/`](captures/), in the `uart-bridge` JSONL format. Replay
 | `dvrip-twin-inout-before.json` | `dvrip_twin.py --reference` with zoom-in and zoom-out levels, majestic-af #17; the stock references give its % of best after a zoom-out |
 | `dvrip-twin-inout-after.json` | the same levels without references, majestic-af #18 (zoom-out bounce, stopped landing check) |
 | `onvif-stock.jsonl.gz` | the stock firmware driven over ONVIF (PTZ and Imaging calls, one mark pair per call); see *Driven over ONVIF* |
+| `onvif-twin-ref.json` | `dvrip_twin.py --transport onvif --reference`, all zoom-in and zoom-out levels: both cameras driven over ONVIF, OpenIPC on majestic's PTZ service |
 | `dvrip-twin-out-ref.json` | `out-X2.0` and `out-X4.0` with references, majestic-af #18: stock at 2 % and 42 % of best after a zoom-out |
 | `tracking-offset.json` | per board, X2.0–X5.0 reached by zoom alone: settled sharpness and a focus sweep through the crest (`offset`) |
 | `tracking-settle.json` | sharpness after the zoom stop, plain, with stop frames, and with a focus nudge during the settle (`settle`) |
