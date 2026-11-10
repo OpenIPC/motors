@@ -1,0 +1,19 @@
+[project]
+name = "uart-bridge"
+version = "0.1.0"
+description = "Transparent camera <-> PTZ-board UART bridge with logger, decoder, injector and capture diff"
+requires-python = ">=3.10"
+dependencies = ["pyserial>=3.5"]
+
+[project.scripts]
+uart-bridge = "uart_bridge.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

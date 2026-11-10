@@ -16,7 +16,7 @@ protocol, profiles, state storage, and UART output on a pseudo terminal. The
 automated check is `.github/workflows/gcc-compat.yml`, a **required status
 check** (`GCC Gate`) on `master`. Know precisely what it does and does not cover:
 
-- It cross-compiles six tools on GCC 12 and GCC 14, then builds and tests
+- It cross-compiles seven tools on GCC 12 and GCC 14, then builds and tests
   `pelcodtui` natively. **`an41908a` is excluded**, because it needs the
   proprietary Hi3516CV500 MPP SDK. Changes under `an41908a/` get no CI
   coverage and must be built by hand. A green gate says nothing about them.
@@ -53,7 +53,7 @@ The `-orig` / `-openipc` suffix selects the toolchain via a target-specific `CC`
 | `-orig` | `arm-hisiv510-linux-gcc` | xm-uart (HiSilicon vendor) |
 | `-orig` | `arm-himix200-linux-gcc` | an41908a (HiSilicon vendor) |
 
-**Build gotcha:** the pattern rules (`xm-%: main.o`) share a single `main.o` across variants. GNU make inherits the target-specific `CC` into prerequisites, so plain `make` compiles `main.o` once with the `-orig` toolchain and then links that same object into the `-openipc` binary. `make -n` in `xm-kmotor/` shows it plainly. Build one variant at a time with `make clean` in between.
+**Build gotcha (`xm-kmotor/`):** the pattern rule (`xm-%: main.o`) shares a single `main.o` across variants. GNU make inherits the target-specific `CC` into prerequisites, so plain `make` compiles `main.o` once with the `-orig` toolchain and then links that same object into the `-openipc` binary. `make -n` in `xm-kmotor/` shows it plainly. Build one variant at a time with `make clean` in between. `xm-uart/` compiles `main.c` per variant and doesn't have this problem; it also has a native `xm-uart-motors-host` target for running under `uart-bridge`.
 
 `camhi-motor/`, `i2c-motor/`, and `ingenic-motor/` have **no Makefile** — compile the single source directly with the right cross-compiler for that SoC (see the arch warning below).
 
@@ -101,9 +101,9 @@ Understanding which pattern a tool uses explains most of its code:
 
 1. **`ioctl` against a vendor kernel module** (`xm-kmotor`, `camhi-motor`, `ingenic-motor`). The module creates `/dev/motor`; the tool is a thin CLI over `ioctl`. The kernel module ships with vendor firmware and must be `insmod`'d with GPIO-pin and max-step parameters *before* the tool works — see each directory's Readme for the exact `insmod`/`modprobe` line, since pin maps are per-camera-model.
 
-2. **Direct bus access from user space** (`i2c-motor`, `i2c-motor/sigmastar-ssc338q`, `an41908a`). No custom kernel module — the tool drives the motor-driver IC itself over I2C SMBus (`/dev/i2c-2`, MS32006 at addr `0x10`) or SPI (`/dev/spidev2.0`, AN41908A) plus sysfs GPIO. `i2c-motor` also needs `devmem` pinmux writes first (documented in its Readme). `i2c-motor/sigmastar-ssc338q` maps `/dev/mem` autonomously to un-gate the motor power rail via RIU register `0x1F223618` (Bank `0x111B` Offset `0x06`).
+2. **Direct bus / register access from user space** (`i2c-motor`, `i2c-motor/sigmastar-ssc338q`, `an41908a`, `zenointel-sd2n4g`). No custom kernel module — the tool drives the motor-driver IC itself over I2C SMBus (`/dev/i2c-2`, MS32006 at addr `0x10`) or SPI (`/dev/spidev2.0`, AN41908A) plus sysfs GPIO. `i2c-motor` also needs `devmem` pinmux writes first (documented in its Readme). `i2c-motor/sigmastar-ssc338q` maps `/dev/mem` autonomously to un-gate the motor power rail via RIU register `0x1F223618` (Bank `0x111B` Offset `0x06`). `zenointel-sd2n4g` has no driver IC at all — it maps `/dev/mem` and bit-bangs a 4-wire stepper head straight on the Goke GK7205V510 PL061 GPIO banks (`0x120B0000 + bank*0x1000`), replaying `gpioStep.ko`'s half-step phase table; open-loop, no home sensor.
 
-3. **Serial protocol over UART** (`xm-uart`). Speaks a Pelco-D variant to a Xiongmai AF module on `/dev/ttyAMA0` at 115200 8N1; interactive keyboard REPL. Note the `AUTO_FOCUS` compile-time switch changes the sync byte from `0xff` to `0xc5`, and system getty must be disabled on that UART.
+3. **Serial protocol over UART** (`xm-uart`). Speaks the XM Pelco-D variant (`C5 addr c1 c2 d1 d2 ck 5C`) to a Xiongmai zoom/focus lens board on `/dev/ttyAMA0` at 115200 8N1; interactive keyboard REPL. System getty must be disabled on that UART. **`xm-uart/PROTOCOL.md` is the measured spec**, backed by captures in `xm-uart/captures/`. Read it before changing any byte: the board accepts only sync `C5`, ignores checksum/address/trailer, and has no inter-byte timeout, so a partial frame silently eats the next command. The direction and focus bits follow what the stock firmware sends, not generic Pelco-D naming; on this board cmd2 `0x80` focuses nearer, measured on video (the reverse of Pelco-D's names).
 
 ## The three `/dev/motor` ioctl ABIs are mutually incompatible
 
@@ -119,7 +119,7 @@ Do not copy an ioctl constant or command value from one tool into another.
 
 All tools share the shape `-d <direction-char> -s <speed> [-x N] [-y N]`, but the letters mean different things depending on whether the tool moves a camera head or a lens:
 
-- **PTZ tools** (`xm-kmotor`, `ingenic-motor`): `u`/`d`/`l`/`r` = up/down/left/right, `s` = stop, `h` = set position, `g` = steps, `t`/`f` = goto/scan (xm-kmotor), `c`/`b` = cruise/go-back (ingenic-motor).
+- **PTZ tools** (`xm-kmotor`, `ingenic-motor`, `zenointel-sd2n4g`): `u`/`d`/`l`/`r` = up/down/left/right, `s` = stop, `h` = set position, `g` = steps, `t`/`f` = goto/scan (xm-kmotor), `c`/`b` = cruise/go-back (ingenic-motor).
 - **Lens tools** (`camhi-motor`, `i2c-motor`, `i2c-motor/sigmastar-ssc338q`): `u`/`d` = zoom in/out, `l`/`r` = focus −/+, `i` = init (i2c-motor / sigmastar), `s` = stop. `i2c-motor/sigmastar-ssc338q` implements simultaneous parabolic parfocal zoom+focus tracking; `-s` sets speed (1..100 or PPS), `-p` sets explicit PPS, `-n`/`-x` set step counts. Moves are synchronous, so `-d s` returns immediately. Relative moves are gated on calibration established by homing (`home` or `-d i`). It also accepts Web UI `ptz.cgi` format `motor <profile> <h> <v>`.
 
 Speed ranges also differ per driver and are silently clamped: 10 (xm-kmotor), 100 (camhi/i2c), 900 (ingenic-motor, the kernel module's practical ceiling), 16383 PPS (sigmastar-ssc338q).
@@ -131,6 +131,23 @@ Speed ranges also differ per driver and are silently clamped: 10 (xm-kmotor), 10
 The only tool with real algorithmic content. It drives the AN41908A lens driver over SPI: register writes are latched by pulsing GPIO `VD_FZ` (24) for focus/zoom and `VD_IS` (19) for iris, with `RSTB` (27) reset on startup. Command sequences (`turn_on`, `send_focus_cmd`, `init_lens`, `init_iris`) are raw register/value byte triples reverse-engineered from vendor firmware — treat the magic bytes as opaque.
 
 On top of that it implements **contrast-based autofocus** in a background pthread (`AF_proc`): it pulls focus-value statistics from the HiSilicon ISP via `HI_MPI_ISP_GetFocusStatistics`, blends horizontal/vertical metrics into a weighted score using the `AFWeight` window map, then hill-climbs — probe a direction, follow increasing contrast, reverse and halve the step on each miss until the step reaches zero. This is why the Makefile links the whole MPP library set. The papers backing this approach are linked in the root `README.md`.
+
+## `uart-bridge/` — host-side validation harness
+
+Python (`uv run …`), not cross-compiled and not covered by the GCC gate; its
+tests are `cd uart-bridge && uv run pytest` (pty pairs, no hardware). It runs on
+a lab host wired camera-UART ↔ host ↔ PTZ-board-UART and records JSONL captures.
+Ports may be pyserial URLs (`socket://…`); `bridge --tee` and `xm-uart -l` together
+replay one camera's lens traffic onto a second camera's board, and `TWIN.md` is the
+procedure for comparing two boards that way.
+`codec.py` holds what is known about the three frame types on that link: the
+camera's `A5` stream (20 frames/s: its clock, day/night, sensor gain and
+autofocus statistic in a chained XOR keyed by the seconds, decoded from the stock
+firmware's `libXmAuto.so`; the board never answers it), the XM Pelco-D
+`C5 … 5C` commands the board does answer, and its `EF 01 type len payload`
+replies (zoom reports `"X1.6 "`). An idle capture has no PTZ→camera bytes;
+that is normal, not a dead link. Keep `codec.key()` consistent with what
+`diff` should treat as meaningful.
 
 ## `api/` — design only, nothing implemented
 

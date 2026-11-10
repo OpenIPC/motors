@@ -1,0 +1,4 @@
+{"type":"header","version":1,"wall":"2026-09-30T08:50:28.679634+00:00","git":"","mode":"inject","ptz":"/dev/ttyUSB1","ptz_baud":115200,"latency":"1ms","stale_dropped":0,"replay":"/root/uart-bridge/captures/e3e-lone-a5-then-zoom.src.jsonl","speed":1.0}
+{"t":54515,"d":"c2p","x":"a5"}
+{"t":200339113,"d":"c2p","x":"c50100200000215c"}
+{"t":550776183,"d":"c2p","x":"c50100000000015c"}

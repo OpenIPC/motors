@@ -1,0 +1,741 @@
+#!/usr/bin/env python3
+"""Reproduce the experiments behind xm-uart/PROTOCOL.md.
+
+Run on the lab host that has the camera board on one USB-UART and the lens
+board on the other, from the uart-bridge directory:
+
+    uv run scripts/xm_uart_audit.py stock   --camera 10.0.0.5 --python-dvr ~/git/python-dvr
+    uv run scripts/xm_uart_audit.py accept
+    uv run scripts/xm_uart_audit.py tool    ../xm-uart/xm-uart-motors-host
+    uv run scripts/xm_uart_audit.py focus   --camera 10.0.0.5
+    uv run scripts/xm_uart_audit.py restore --zoom 1.2
+    uv run scripts/xm_uart_audit.py refocus --camera 10.0.0.5
+
+stock   bridges camera<->board and drives every DVRIP PTZ command (E1)
+accept  host as camera: which frame variants the board acts on (E3)
+tool    a program under test through `bridge --cam pty`, scripted keys (E2)
+focus   RTSP sharpness (ffmpeg blurdetect) for regions of the current image
+restore zoom out/in with the board's own reports until it reads --zoom
+refocus hill-climb focus on RTSP sharpness (experiments leave focus drifted)
+focusdir which focus bit moves focus nearer: sweeps with near and far targets
+
+Everything moves the lens; `accept` and `tool` return the zoom to where it
+started, `stock` leaves it roughly there, `restore` fixes the rest.
+Captures go to captures/<experiment>-*.jsonl.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+UV = "uv"
+HERE = Path(__file__).resolve().parent.parent  # uart-bridge/
+CAPTURES = HERE / "captures"
+STOP = "c50100000000015c"
+REPORT_S = 0.3  # a zoom pulse this long always yields a report (they come every ~225 ms)
+
+
+def frame(c1=0, c2=0, d1=0, d2=0, sync=0xC5, addr=1, ck=None, trailer=b"\x5c") -> str:
+    b = bytes([sync, addr, c1, c2, d1, d2])
+    return (b + bytes([sum(b[1:]) % 256 if ck is None else ck]) + trailer).hex()
+
+
+ZOOM_IN, ZOOM_OUT = frame(c2=0x20), frame(c2=0x40)
+
+
+def uart_bridge(*args, **kw):
+    return subprocess.run([UV, "run", "uart-bridge", *args], cwd=HERE, **kw)
+
+
+def zooms(log: Path) -> list[float]:
+    raw = bytes.fromhex("".join(json.loads(line)["x"] for line in open(log)
+                                if json.loads(line).get("d") == "p2c"))
+    return [float(z) for z in re.findall(rb"X(\d+\.\d)", raw)]
+
+
+def inject(name: str, records: list[tuple[float, str]], tail: float = 1.2,
+           ptz: str | None = None) -> list[float]:
+    """Host as camera: send (seconds, hex) records, return the zoom reports."""
+    CAPTURES.mkdir(exist_ok=True)
+    src, out = CAPTURES / f"{name}.src.jsonl", CAPTURES / f"{name}.jsonl"
+    with open(src, "w") as f:
+        f.write(json.dumps({"type": "header", "version": 1, "mode": "synthetic", "note": name}) + "\n")
+        for t, x in records:
+            f.write(json.dumps({"t": int(t * 1e9), "d": "c2p", "x": x}) + "\n")
+    out.unlink(missing_ok=True)
+    # --on-abort: if this run is interrupted before its stop frame is due,
+    # inject still sends one, so no motor is left running.
+    uart_bridge("inject", "--replay", str(src), "--tail", str(tail), "--quiet", "--log", str(out),
+                "--on-abort", STOP, *(("--ptz", ptz) if ptz else ()), capture_output=True, check=True)
+    return zooms(out)
+
+
+def pulse(name: str, cmd: str, hold: float = 0.35, ptz: str | None = None) -> list[float]:
+    """cmd for `hold` s, then stop; on the vendor board, or on `ptz` (e.g. the
+    socket:// URL of an xm-uart -l relay in front of another board)."""
+    return inject(name, [(0, cmd), (hold, STOP)], ptz=ptz)
+
+
+class Bridge:
+    """`uart-bridge bridge` in the background, with marks and probes on stdin."""
+
+    def __init__(self, log: str, note: str, pty: bool = False, extra: tuple[str, ...] = ()):
+        self.log = HERE / log
+        self.log.unlink(missing_ok=True)  # the bridge never overwrites a capture
+        args = [UV, "run", "uart-bridge", "bridge", "--quiet", "--note", note, "--log", log, *extra]
+        if pty:
+            args[4:4] = ["--cam", "pty"]
+        self.p = subprocess.Popen(args, cwd=HERE, stdin=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.path = None
+        for line in self.p.stderr:
+            m = re.search(r"(/dev/pts/\d+)|logging to", line)
+            if m:
+                self.path = m.group(1)
+                if not pty or self.path:
+                    break
+        if self.p.poll() is not None or (pty and not self.path):
+            raise SystemExit(f"uart-bridge bridge did not start (exit {self.p.poll()})")
+
+    def send(self, line: str) -> None:
+        self.p.stdin.write(line + "\n")
+        self.p.stdin.flush()
+
+    def close(self) -> None:
+        self.p.stdin.close()
+        self.p.send_signal(signal.SIGTERM)
+        self.p.wait()
+
+
+class Dvrip:
+    """A camera's DVRIP PTZ control (python-dvr), with marks in a bridge when
+    there is one: the stock XM firmware, or majestic with netip enabled."""
+
+    def __init__(self, a, br: "Bridge | None" = None):
+        sys.path.insert(0, str(Path(a.python_dvr).expanduser()))
+        from dvrip import DVRIPCam  # python-dvr
+        self.br = br
+        self.cam = DVRIPCam(a.camera, user=a.user, password=a.password)
+        if not self.cam.login():
+            raise SystemExit("DVRIP login failed")
+
+    @staticmethod
+    def param(preset):
+        return {"AUX": {"Number": 0, "Status": "On"}, "Channel": 0, "MenuOpts": "Enter",
+                "POINT": {"bottom": 0, "left": 0, "right": 0, "top": 0}, "Pattern": "SetBegin",
+                "Preset": preset, "Step": 5, "Tour": 0}
+
+    def step(self, cmd, hold=0.5, settle=1.5):
+        # python-dvr's ptz_step convention: Preset 65535 starts, -1 stops.
+        # The board keeps moving until it gets a stop, so stop no matter what.
+        self.mark(f"{cmd} start ({hold} s)")
+        self.cam.set_command("OPPTZControl", {"Command": cmd, "Parameter": self.param(65535)})
+        try:
+            time.sleep(hold)
+        finally:
+            self.mark(f"{cmd} stop")
+            self.cam.set_command("OPPTZControl", {"Command": cmd, "Parameter": self.param(-1)})
+        time.sleep(settle)
+
+    def mark(self, note: str) -> None:
+        if self.br:
+            self.br.send(note)
+
+    def close(self):
+        self.cam.close()
+
+
+def cmd_stock(a) -> None:
+    sys.path.insert(0, str(Path(a.python_dvr).expanduser()))
+    from dvrip import DVRIPCam  # python-dvr
+
+    br = Bridge("captures/e1-stock.jsonl", "E1 stock firmware PTZ via DVRIP")
+    time.sleep(3)
+    cam = DVRIPCam(a.camera, user=a.user, password=a.password)
+    if not cam.login():
+        raise SystemExit("DVRIP login failed")
+    print("Uart.PTZ:", json.dumps(cam.get_info("Uart.PTZ")))
+
+    def param(preset):
+        return {"AUX": {"Number": 0, "Status": "On"}, "Channel": 0, "MenuOpts": "Enter",
+                "POINT": {"bottom": 0, "left": 0, "right": 0, "top": 0}, "Pattern": "SetBegin",
+                "Preset": preset, "Step": 5, "Tour": 0}
+
+    def step(cmd, hold=0.5):
+        # python-dvr's ptz_step convention: Preset 65535 starts, -1 stops.
+        # The board keeps moving until it gets a stop, so stop no matter what.
+        br.send(f"{cmd} start")
+        cam.set_command("OPPTZControl", {"Command": cmd, "Parameter": param(65535)})
+        try:
+            time.sleep(hold)
+        finally:
+            br.send(f"{cmd} stop")
+            cam.set_command("OPPTZControl", {"Command": cmd, "Parameter": param(-1)})
+        time.sleep(1.5)
+
+    try:
+        for c in ("ZoomTile", "ZoomWide", "FocusNear", "FocusFar", "IrisSmall", "IrisLarge",
+                  "DirectionLeft", "DirectionRight", "DirectionUp", "DirectionDown",
+                  "DirectionLeftUp", "DirectionRightDown"):
+            step(c)
+        for c in ("SetPreset", "GotoPreset", "ClearPreset"):
+            br.send(f"{c} {a.preset}")
+            cam.ptz(c, preset=a.preset)
+            time.sleep(2.5)
+    finally:
+        cam.close()
+        time.sleep(1)
+        br.close()
+    print("capture: captures/e1-stock.jsonl  (uv run uart-bridge decode ...)")
+
+
+def cmd_accept(a) -> None:
+    def case(name, cmd):
+        z = pulse(f"e3-{name}", cmd)
+        print(f"{name:20s} {cmd:18s} {'ACTED ' + str(z) if z else 'ignored'}", flush=True)
+        if z:
+            pulse(f"e3-{name}-back", ZOOM_OUT)
+
+    for name, cmd in [
+        ("reference", ZOOM_IN),
+        ("sync-ff", frame(c2=0x20, sync=0xFF)),
+        ("sync-a0", frame(c2=0x20, sync=0xA0)),
+        ("cksum-00", frame(c2=0x20, ck=0x00)),
+        ("cksum-mod100", frame(c2=0x20, d1=0x40, d2=0x40, ck=(1 + 0x20 + 0x40 + 0x40) % 100)),
+        ("cksum-mod256", frame(c2=0x20, d1=0x40, d2=0x40)),
+        ("addr-0", frame(c2=0x20, addr=0)),
+        ("addr-ff", frame(c2=0x20, addr=0xFF)),
+        ("trailer-00", frame(c2=0x20, trailer=b"\x00")),
+    ]:
+        case(name, cmd)
+    # The parser trap: a lone sync byte swallows the next command.
+    for name, first in (("lone-a5", "a5"), ("lone-c5", "c5"), ("lone-5a", "5a"),
+                        ("whole-a5-frame", "a57b9ef0efeee0f4")):
+        z = inject(f"e3e-{name}-then-zoom", [(0, first), (0.2, ZOOM_IN), (0.55, STOP)])
+        print(f"{name + ' + zoom':20s} {'ACTED ' + str(z) if z else 'command lost'}", flush=True)
+        if z:
+            pulse(f"e3e-{name}-back", ZOOM_OUT)
+        else:
+            inject(f"e3e-{name}-flush", [(0, STOP), (0.1, STOP)], tail=0.3)  # realign the parser
+
+
+def cmd_tool(a) -> None:
+    binary = str(Path(a.binary).resolve())
+    br = Bridge("captures/e2-tool.jsonl", f"E2 {binary} via pty", pty=True)
+    print("pty:", br.path)
+    tool = subprocess.Popen([binary, "-d", br.path], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT)
+
+    def key(k, what):
+        br.send(f"key {k!r}: {what}")
+        tool.stdin.write(k.encode())
+        tool.stdin.flush()
+
+    time.sleep(1)
+    for k, hold, what in (("+", 0.5, "zoom in"), ("-", 0.5, "zoom out"), ("z", 0.4, "focus near"),
+                          ("x", 0.4, "focus far"), ("h", 0.3, "pan left"), ("l", 0.3, "pan right"),
+                          ("j", 0.3, "tilt down"), ("k", 0.3, "tilt up")):
+        key(k, what)
+        time.sleep(hold)
+        key(" ", "stop")
+        time.sleep(1.2)
+    key("+", "zoom in, then SIGINT mid-move")
+    time.sleep(0.4)
+    tool.send_signal(signal.SIGINT)
+    try:
+        out = tool.communicate(timeout=3)[0].decode(errors="replace")
+    except subprocess.TimeoutExpired:
+        tool.kill()
+        out = tool.communicate()[0].decode(errors="replace")
+        print("tool ignored SIGINT")
+    time.sleep(1)
+    back = subprocess.Popen([binary, "-d", br.path], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL)
+    br.send("zoom back")
+    time.sleep(0.3)
+    for k, pause in ((b"-", 0.4), (b"q", 0)):
+        back.stdin.write(k)
+        back.stdin.flush()
+        time.sleep(pause)
+    back.wait(timeout=3)
+    time.sleep(0.5)
+    br.close()
+    print(out[-2000:])
+    print("capture: captures/e2-tool.jsonl; compare: uv run uart-bridge diff "
+          "../xm-uart/captures/e2-xmuart-new.jsonl captures/e2-tool.jsonl")
+
+
+# 2592x1944 frame, w:h:x:y; adjust to the scene in front of the camera
+REGIONS = {"near": "700:750:130:230", "far": "330:900:640:340", "mid": "600:250:1450:520"}
+
+
+def cmd_focus(a) -> None:
+    url = rtsp_url(a)
+    CAPTURES.mkdir(exist_ok=True)
+    snap = CAPTURES / f"focus-{time.strftime('%H%M%S')}.jpg"
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-rtsp_transport", "tcp", "-i", url,
+                    "-frames:v", "1", "-y", str(snap)], check=True, timeout=30)
+    for name, crop in REGIONS.items():
+        r = subprocess.run(["ffmpeg", "-hide_banner", "-i", str(snap), "-vf", f"crop={crop},blurdetect",
+                            "-f", "null", "-"], capture_output=True, text=True)
+        m = re.search(r"blur mean: ([0-9.]+)", r.stderr)
+        print(f"{name:5s} blur={m.group(1) if m else '?'}  (lower is sharper)")
+    print("snapshot:", snap)
+
+
+def sharpness_blur(a) -> float:
+    """Whole-frame blurdetect of one RTSP frame (lower is sharper)."""
+    url = rtsp_url(a)
+    r = subprocess.run(["ffmpeg", "-hide_banner", "-rtsp_transport", "tcp", "-i", url, "-frames:v", "1",
+                        "-vf", "blurdetect", "-f", "null", "-"], capture_output=True, text=True, timeout=30)
+    return float(re.search(r"blur mean: ([0-9.]+)", r.stderr).group(1))
+
+
+def cmd_refocus(a) -> None:
+    """Contrast hill-climb with focus pulses: move while the image sharpens,
+    reverse and halve the pulse when it gets worse (like an41908a's AF)."""
+    near, far = frame(c2=0x80), frame(c1=0x01)
+    best = sharpness_blur(a)
+    print(f"start blur={best:.2f}", flush=True)
+    direction, hold = near, 0.4
+    while hold >= 0.05:
+        pulse("refocus", direction, hold=hold)
+        time.sleep(0.5)
+        now = sharpness_blur(a)
+        print(f"{'near' if direction == near else 'far '} {hold:.2f}s blur={now:.2f}", flush=True)
+        if now < best:
+            best = now
+            continue
+        # Worse: undo this step, then continue the other way with smaller
+        # pulses. The undo never lands exactly where the step started
+        # (backlash, uneven motor speed), so measure again instead of
+        # trusting the old value.
+        direction = far if direction == near else near
+        pulse("refocus", direction, hold=hold)
+        time.sleep(0.5)
+        best = sharpness_blur(a)
+        print(f"undo -> blur={best:.2f}", flush=True)
+        hold /= 2
+    print(f"done blur={sharpness_blur(a):.2f}")
+
+
+def resync_camera_osd() -> list[float]:
+    """The camera shows the last zoom report *it* received. Everything sent
+    by inject bypassed it, so nudge the zoom in and back through the bridge
+    to hand it a current report. Returns the reports seen, since the nudge
+    itself moves the lens."""
+    br = Bridge("captures/osd-resync.jsonl", "resync camera OSD zoom")
+    try:
+        for cmd in (ZOOM_IN, ZOOM_OUT):
+            time.sleep(1.0)
+            br.send("!" + cmd)
+            time.sleep(REPORT_S)  # long enough that the board reports it
+            br.send("!" + STOP)
+        time.sleep(1.5)
+    finally:
+        br.close()
+    return zooms(br.log)
+
+
+class CaptureError(Exception):
+    pass
+
+
+def rtsp_url(a) -> str:
+    """--rtsp if given (any camera), else the XM stock firmware's stream."""
+    if getattr(a, "rtsp", None):
+        return a.rtsp
+    return (f"rtsp://{a.camera}:554/user={a.user}&password={a.password}"
+            "&channel=1&stream=0.sdp?real_stream")
+
+
+def gray_frames(a, n: int = 2) -> tuple[int, int, list[bytes]]:
+    """n consecutive RTSP frames as 8-bit greyscale, straight from ffmpeg."""
+    url = rtsp_url(a)
+    probe = subprocess.run(["ffprobe", "-v", "error", "-rtsp_transport", "tcp", "-select_streams", "v:0",
+                            "-show_entries", "stream=width,height", "-of", "csv=p=0", url],
+                           capture_output=True, text=True, timeout=30)
+    try:
+        w, h = (int(v) for v in probe.stdout.strip().split(",")[:2])
+    except ValueError:
+        raise CaptureError(f"ffprobe gave no frame size (exit {probe.returncode}): {probe.stderr.strip()}")
+    cap = subprocess.run(["ffmpeg", "-loglevel", "error", "-rtsp_transport", "tcp", "-i", url,
+                          "-frames:v", str(n), "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+                         capture_output=True, timeout=30)
+    if cap.returncode != 0 or len(cap.stdout) < n * w * h:
+        raise CaptureError(f"ffmpeg returned {len(cap.stdout) // (w * h)} of {n} frames "
+                           f"(exit {cap.returncode}): {cap.stderr.decode(errors='replace').strip()}")
+    return w, h, [cap.stdout[i * w * h:(i + 1) * w * h] for i in range(n)]
+
+
+def tenengrad(frame: bytes, w: int, x: int, y: int, r: int) -> float:
+    """Mean squared central-difference gradient in a (2r)^2 box: higher is sharper."""
+    total = 0
+    for yy in range(y - r + 1, y + r - 1):
+        row, up, down = yy * w, (yy - 1) * w, (yy + 1) * w
+        for xx in range(x - r + 1, x + r - 1):
+            gx = frame[row + xx + 1] - frame[row + xx - 1]
+            gy = frame[down + xx] - frame[up + xx]
+            total += gx * gx + gy * gy
+    return total / (2 * r - 2) ** 2
+
+
+def peak_position(values: list[float]) -> float | None:
+    """Centroid of the part of a sharpness curve above 80% of its maximum;
+    None for a flat curve (no texture, blank or covered target)."""
+    top = max(values)
+    if top <= 0 or top - min(values) < 0.05 * top:
+        return None
+    pts = [(i + 1, v / top - 0.8) for i, v in enumerate(values) if v / top >= 0.8]
+    return sum(i * wgt for i, wgt in pts) / sum(wgt for _, wgt in pts)
+
+
+def parse_target(text: str) -> tuple[str, tuple[int, int, int]]:
+    try:
+        name, xyr = text.split("=")
+        x, y, r = (int(v) for v in xyr.split(","))
+    except ValueError:
+        raise SystemExit(f"target {text!r}: expected NAME=X,Y,R")
+    if r < 3:
+        raise SystemExit(f"target {name}: radius {r} too small, need >= 3")
+    return name, (x, y, r)
+
+
+def cmd_focusdir(a) -> None:
+    """Which focus bit moves focus nearer. Sweep focus across its range in
+    small steps (one direction per sweep, backlash taken up first) and find
+    where each target is sharpest: sweeping nearer, far targets peak before
+    near ones. The sweep is repeated in reverse and again forwards, so a
+    physical effect has to flip sign with the direction."""
+    parsed = [parse_target(t) for t in a.near + a.far]
+    names = [n for n, _ in parsed]
+    if len(set(names)) != len(names):
+        raise SystemExit(f"target names must be unique: {names}")
+    near = dict(parsed[:len(a.near)])
+    far = dict(parsed[len(a.near):])
+    targets = {**near, **far}
+    # Pre-flight, before the lens moves: the camera delivers frames and every
+    # target box fits inside them.
+    try:
+        w, h, _ = gray_frames(a, 1)
+    except CaptureError as e:
+        raise SystemExit(f"camera capture failed: {e}")
+    for k, (x, y, r) in targets.items():
+        if not (r <= x < w - r and r <= y < h - r):
+            raise SystemExit(f"target {k} ({x},{y}) r={r} does not fit a {w}x{h} frame")
+    bit80, bit01 = frame(c2=0x80), frame(c1=0x01)
+    pulse("focusdir-away", bit01, hold=a.away)
+    time.sleep(0.3)
+    verdicts = []
+    for name, move in (("cmd2 0x80", bit80), ("cmd1 0x01", bit01), ("cmd2 0x80", bit80)):
+        pulse("focusdir-takeup", move, hold=0.15)
+        time.sleep(0.3)
+        curves = {k: [] for k in targets}
+        for _ in range(a.steps):
+            pulse("focusdir-step", move, hold=a.step)
+            time.sleep(0.3)
+            try:
+                w, _, frames = gray_frames(a)
+            except CaptureError as e:
+                raise SystemExit(f"camera capture failed mid-sweep ({e}); focus is off, "
+                                 "run `refocus` once the camera is back")
+            for k, (x, y, r) in targets.items():
+                curves[k].append(sum(tenengrad(f, w, x, y, r) for f in frames) / len(frames))
+        peaks = {k: peak_position(v) for k, v in curves.items()}
+        flat = [k for k, v in peaks.items() if v is None]
+        if flat:
+            print(f"sweep {name}: inconclusive, no sharpness change on {', '.join(flat)}", flush=True)
+            verdicts.append(None)
+            continue
+        offset = (sum(peaks[k] for k in near) / len(near)) - (sum(peaks[k] for k in far) / len(far))
+        print(f"sweep {name}: " + "  ".join(f"{k}={v:.2f}" for k, v in peaks.items())
+              + f"  near-far={offset:+.2f} steps", flush=True)
+        # near peaking later means this sweep moves focus nearer
+        verdicts.append(("0x80" if move == bit80 else "0x01") if offset > 0 else
+                        ("0x01" if move == bit80 else "0x80"))
+    if None not in verdicts and len(set(verdicts)) == 1:
+        bit = verdicts[0]
+        print(f"focus NEARER = {'cmd2 0x80' if bit == '0x80' else 'cmd1 0x01'} (all three sweeps agree)")
+    else:
+        print(f"inconclusive: sweeps disagree {verdicts}")
+    pulse("focusdir-back", bit01, hold=a.away)  # roughly back; use `refocus` to finish
+
+
+def cmd_sync(a) -> None:
+    """Put both lenses in the same known state: zoom driven into the wide end
+    stop, where each board sets focus from its own zoom tracking. Both are
+    driven at once; the stop is confirmed by silence plus a reverse probe."""
+    import threading
+    results = {}
+
+    def to_wide(name, ptz):
+        try:
+            pulse(f"sync-{name}-wide", ZOOM_OUT, hold=a.hold, ptz=ptz)
+            silent = not pulse(f"sync-{name}-check", ZOOM_OUT, hold=REPORT_S, ptz=ptz)
+            back = pulse(f"sync-{name}-probe", ZOOM_IN, hold=REPORT_S, ptz=ptz)
+            pulse(f"sync-{name}-return", ZOOM_OUT, hold=1.0, ptz=ptz)
+            results[name] = (silent, back)
+        except Exception as e:  # report per board; the other may still be fine
+            results[name] = e
+
+    th = [threading.Thread(target=to_wide, args=("vendor", None)),
+          threading.Thread(target=to_wide, args=("openipc", a.openipc))]
+    for t in th:
+        t.start()
+    for t in th:
+        t.join()
+    ok = True
+    for name, r in results.items():
+        if isinstance(r, Exception):
+            print(f"{name}: FAILED {r}")
+            ok = False
+            continue
+        silent, back = r
+        good = silent and bool(back)
+        ok &= good
+        print(f"{name}: {'at the wide end stop' if good else 'NOT confirmed'} "
+              f"(silent at stop: {silent}, reverse probe reported {back})")
+    if not ok:
+        raise SystemExit(1)
+
+
+def roi_box(w: int, h: int, roi, r: int) -> tuple[int, int, int]:
+    """Centre and half-size, in pixels, of the box sharpness is measured in:
+    `roi` = (x, y, half-size) as fractions of the frame's width, height and
+    height, or None for the central box of half-size `r` px. Kept inside it."""
+    if not roi:
+        x, y, rr = w // 2, h // 2, r
+    else:
+        x, y, rr = int(roi[0] * w), int(roi[1] * h), max(8, int(roi[2] * h))
+    rr = min(rr, w // 2 - 1, h // 2 - 1)
+    return min(max(x, rr + 1), w - rr - 1), min(max(y, rr + 1), h - rr - 1), rr
+
+
+def parse_roi(text: str) -> tuple[float, float, float]:
+    """"X,Y,R" as fractions of the frame (centre x, centre y, half-size)."""
+    try:
+        x, y, r = (float(v) for v in text.split(","))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"want X,Y,R as fractions, got {text!r}")
+    if not (0 < x < 1 and 0 < y < 1 and 0 < r < 0.5):
+        raise argparse.ArgumentTypeError(f"X and Y in 0..1 and R in 0..0.5, got {text!r}")
+    return x, y, r
+
+
+def center_sharpness(a, r: int = 200, wait: float = 240) -> float:
+    """Tenengrad of the central (2r)^2 box, or of `a.roi` if the namespace
+    has one (see roi_box), two frames averaged: higher is sharper.
+
+    The XM stock firmware restarts its services now and then under a long run of
+    short RTSP sessions (a focus sweep opens hundreds): RTSP, DVRIP and HTTP go
+    away for about two minutes, the camera still answers ping. Wait up to `wait`
+    s for it rather than lose the run."""
+    t0 = time.monotonic()
+    while True:
+        try:
+            w, h, frames = gray_frames(a)
+            break
+        except (CaptureError, subprocess.TimeoutExpired) as e:
+            if time.monotonic() - t0 > wait:
+                raise
+            print(f"  no video ({str(e).splitlines()[0][:80]}); waiting for the camera", flush=True)
+            time.sleep(10)
+    x, y, rr = roi_box(w, h, getattr(a, "roi", None), r)
+    return sum(tenengrad(f, w, x, y, rr) for f in frames) / len(frames)
+
+
+def focus_offset(a, tag: str = "fo", verbose: bool = True) -> tuple[list[float], float]:
+    """Sweep focus through the sharpest point and return (curve, offset): how
+    far the board's tracked focus is from the sharpest focus, in seconds of
+    focus drive (positive: sharper nearer). Sweep from `away` s on the far
+    side, after taking up backlash, in 0.1 s steps; then drive back by the
+    same amount (approximately: backlash). `tag` prefixes the capture names,
+    so sweeps on two boards at once do not collide. Raises SystemExit when
+    the curve has no peak inside the sweep."""
+    near, far = frame(c2=0x80), frame(c1=0x01)
+    ptz = a.ptz or None
+    center_sharpness(a)  # pre-flight: fail before moving if there is no video
+    curve = []
+    driven = 0.0  # net drive toward near so far; undone below whatever happens
+    try:
+        pulse(f"{tag}-away", far, hold=a.away, ptz=ptz)
+        driven -= a.away
+        pulse(f"{tag}-takeup", near, hold=0.15, ptz=ptz)
+        driven += 0.15
+        for i in range(a.steps):
+            pulse(f"{tag}-step", near, hold=0.1, ptz=ptz)
+            driven += 0.1
+            time.sleep(0.3)
+            curve.append(center_sharpness(a))
+            if verbose:
+                print(f"  step {i + 1:2d}  sharpness {curve[-1]:9.1f}", flush=True)
+    finally:
+        if driven > 0:
+            pulse(f"{tag}-back", far, hold=driven, ptz=ptz)
+        elif driven < 0:
+            pulse(f"{tag}-back", near, hold=-driven, ptz=ptz)
+    peak = peak_position(curve)
+    if peak is None:
+        raise SystemExit("flat sharpness curve: no texture in the centre, or nowhere near focus")
+    best = max(range(len(curve)), key=curve.__getitem__)
+    if best in (0, len(curve) - 1):
+        raise SystemExit(f"no peak inside the sweep: sharpest at its {'start' if best == 0 else 'end'} "
+                         f"({curve[best]:.1f}); widen --away/--steps")
+    # step k sits at -away + 0.15 (take-up) + 0.1 k from where tracking had focus
+    return curve, round(0.1 * peak + 0.15 - a.away, 2)
+
+
+def cmd_focusoffset(a) -> None:
+    """How far a board's tracked focus is from the camera's sharpest focus."""
+    curve, offset = focus_offset(a)
+    print(f"sharpest at step {peak_position(curve):.2f}; tracked focus offset {offset:+.2f} s of drive "
+          f"(positive: the sharpest point is nearer)")
+
+
+def cmd_twin(a) -> None:
+    """Live twin run: bridge the vendor camera with --tee to the OpenIPC
+    relay, drive the stock firmware over DVRIP, and compare both boards."""
+    if not a.no_sync:
+        cmd_sync(a)
+    log = f"captures/twin-{time.strftime('%H%M%S')}.jsonl"
+    br = Bridge(log, "twin: vendor DVRIP session teed to the OpenIPC board", extra=("--tee", a.openipc))
+    cam = None
+    vendor = argparse.Namespace(camera=a.camera, user=a.user, password=a.password, rtsp=None)
+    other = argparse.Namespace(rtsp=a.openipc_rtsp)
+
+    def checkpoint(label):
+        v, o = center_sharpness(vendor), center_sharpness(other)
+        br.send(f"checkpoint {label}: sharpness vendor {v:.0f} openipc {o:.0f}")
+        print(f"{label:22s} sharpness vendor {v:9.1f}   openipc {o:9.1f}", flush=True)
+
+    try:
+        time.sleep(2)
+        cam = Dvrip(a, br)  # inside try: a failed login must still stop the bridge
+        checkpoint("start (wide)")
+        for cmd, hold in (("ZoomTile", 1.5), ("ZoomTile", 1.5), ("ZoomWide", 0.8), ("FocusNear", 0.4),
+                          ("FocusFar", 0.4), ("ZoomWide", 4.0)):
+            cam.step(cmd, hold=hold, settle=2.0)
+            checkpoint(f"after {cmd} {hold}s")
+    finally:
+        if cam is not None:
+            cam.close()
+        time.sleep(1)
+        br.close()
+    print(f"capture: {log}")
+    rc = uart_bridge("boards", log).returncode
+    if rc:
+        raise SystemExit(rc)  # the boards did not settle alike
+
+
+def cmd_restore(a) -> None:
+    """Zoom to --zoom using the board's own reports. Exits non-zero if the
+    target cannot be reached (end stop) or the board stops answering."""
+
+    def confirm_silence(i, cmd, last):
+        # A short pulse can end without a report, so silence is only an end
+        # stop once a report-length pulse is silent too and the board still
+        # answers in the other direction.
+        z = pulse(f"restore-{i}-confirm", cmd, hold=REPORT_S)
+        if z:
+            return z
+        other = ZOOM_IN if cmd == ZOOM_OUT else ZOOM_OUT
+        if pulse(f"restore-{i}-other", other, hold=REPORT_S):
+            pulse(f"restore-{i}-back", cmd, hold=REPORT_S + 0.2)  # undo, and a bit more
+            end = "wide" if cmd == ZOOM_OUT else "tele"
+            raise SystemExit(f"zoom {end} end stop reached near X{last}; X{a.zoom} is out of range")
+        raise SystemExit("the board stopped sending zoom reports in both directions")
+
+    # Where are we? Probe toward tele; at the tele end stop that is silent,
+    # so probe toward wide instead and start from that report.
+    z = pulse("restore-probe", ZOOM_IN, hold=REPORT_S) or \
+        pulse("restore-probe-wide", ZOOM_OUT, hold=REPORT_S)
+    if not z:
+        raise SystemExit("no zoom reports from the board in either direction")
+    for i in range(40):
+        now = z[-1]
+        if abs(now - a.zoom) < 0.05:
+            # Only done once the camera has seen a report on target: the
+            # resync nudge moves the lens too, so measure what it left.
+            z = resync_camera_osd()
+            if not z:
+                raise SystemExit("no zoom reports during the camera OSD resync")
+            if abs(z[-1] - a.zoom) < 0.05:
+                print("zoom", z[-1], "(camera OSD in sync)")
+                return
+            print("resync left zoom at", z[-1], "- correcting")
+            continue
+        cmd = ZOOM_OUT if now > a.zoom else ZOOM_IN
+        z = pulse(f"restore-{i}", cmd, hold=min(0.4, 0.1 + abs(now - a.zoom) / 4))
+        if not z:
+            z = confirm_silence(i, cmd, now)
+    raise SystemExit(f"gave up at X{z[-1]}")
+
+
+def positive_int(text: str) -> int:
+    v = int(text)
+    if v <= 0:
+        raise argparse.ArgumentTypeError(f"must be > 0, got {v}")
+    return v
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    for name, fn in (("stock", cmd_stock), ("focus", cmd_focus), ("refocus", cmd_refocus),
+                     ("focusdir", cmd_focusdir), ("focusoffset", cmd_focusoffset), ("twin", cmd_twin)):
+        s = sub.add_parser(name)
+        s.add_argument("--camera", help="stock XM camera IP (its RTSP URL and DVRIP)")
+        s.add_argument("--user", default="admin")
+        s.add_argument("--password", default="")
+        s.add_argument("--rtsp", help="any camera's RTSP URL, instead of the XM one from --camera")
+        s.set_defaults(func=fn)
+    for name in ("twin",):
+        sub.choices[name].add_argument("--python-dvr", default="~/git/python-dvr")
+        sub.choices[name].add_argument("--openipc", required=True, metavar="URL",
+                                       help="xm-uart -l relay on the second camera, e.g. socket://CAM:9000")
+        sub.choices[name].add_argument("--openipc-rtsp", required=True, help="the OpenIPC camera's RTSP URL")
+        sub.choices[name].add_argument("--no-sync", action="store_true")
+        sub.choices[name].add_argument("--hold", type=float, default=6.0, help="sync zoom-out time, s")
+    fo = sub.choices["focusoffset"]
+    fo.add_argument("--ptz", help="lens board port or URL (default: the vendor board)")
+    fo.add_argument("--steps", type=positive_int, default=12)
+    fo.add_argument("--away", type=float, default=0.6, help="start this far on the far side, s")
+    sy = sub.add_parser("sync", help="drive both lenses into the wide end stop")
+    sy.add_argument("--openipc", required=True, metavar="URL",
+                    help="xm-uart -l relay on the second camera, e.g. socket://CAM:9000")
+    sy.add_argument("--hold", type=float, default=6.0, help="zoom-out time, s")
+    sy.set_defaults(func=cmd_sync)
+    sub.choices["stock"].add_argument("--python-dvr", default="~/git/python-dvr")
+    sub.choices["stock"].add_argument("--preset", type=int, default=5)
+    fd = sub.choices["focusdir"]
+    # Defaults: the 85H50AI rig at X2.4. The chair occludes the doorway and the
+    # far door is seen through it, so their depth order is certain.
+    fd.add_argument("--near", action="append", metavar="NAME=X,Y,R",
+                    default=None, help="near target box centre and half-size (repeatable)")
+    fd.add_argument("--far", action="append", metavar="NAME=X,Y,R", default=None)
+    fd.add_argument("--steps", type=positive_int, default=30)
+    fd.add_argument("--step", type=float, default=0.1, help="focus pulse per step, s")
+    fd.add_argument("--away", type=float, default=1.5, help="initial defocus, s")
+    sub.add_parser("accept").set_defaults(func=cmd_accept)
+    t = sub.add_parser("tool")
+    t.add_argument("binary")
+    t.set_defaults(func=cmd_tool)
+    r = sub.add_parser("restore")
+    r.add_argument("--zoom", type=float, default=1.2)
+    r.set_defaults(func=cmd_restore)
+    a = p.parse_args()
+    if getattr(a, "camera", "x") is None and not getattr(a, "rtsp", None):
+        p.error("--camera or --rtsp is required")
+    if a.cmd == "focusdir":
+        a.near = a.near or ["chair_mesh=200,300,90"]
+        a.far = a.far or ["room_door=660,640,70", "door_leaf=920,560,70", "star=1820,540,70"]
+    a.func(a)
+
+
+if __name__ == "__main__":
+    main()

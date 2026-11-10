@@ -11,11 +11,35 @@ access, separate driver programs, and architecture tests.
 Read the [`motorsd` documentation](motorsd/README.md) for the current scope and
 usage examples.
 
+## Anjoy motor control
+
+[`anjoy-motor`](anjoy-motor/) drives the zoom/focus/iris lens motors and the
+pan/tilt head of Anjoy AF camera modules over their motor-MCU UART
+(Pelco-D-style frames), and decodes the MCU's live position reports.
+Protocol recovered from a live MTF45-4G_AF.
+
+## Zenointel SD-2N-4G pan/tilt
+
+[`zenointel-sd2n4g`](zenointel-sd2n4g/) drives the pan/tilt stepper head of the
+Zenointel SD-2N-4G (Goke GK7205V510) directly over memory-mapped PL061 GPIO — no
+vendor kernel module and no vendor app, so it also runs under OpenIPC. The GPIO
+map, half-step phase table and per-axis config were reverse-engineered from the
+stock firmware (`motor.ko`/`gpioStep.ko`). The lens is fixed — no motorized
+zoom/focus on this model.
+
 ## Pelco-D configuration TUI
 
 [`pelcodtui`](pelcodtui/) is an ncurses interface for Pelco-D PTZ controller
 settings and manual movement. Camera profiles describe controller-specific
 commands without hard-coding them in the application.
+
+## UART bridge / validation harness
+
+[`uart-bridge`](uart-bridge/) is a host-side Python tool (run with `uv`) that sits
+between a camera board and its PTZ motor board on two USB-UART adapters. It
+forwards and timestamps every byte, decodes frames, can stand in for the camera,
+and diffs captures so a reimplemented motor driver can be checked against the
+stock firmware's traffic.
 
 ## Some theory behind
 
