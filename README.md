@@ -18,6 +18,14 @@ map, half-step phase table and per-axis config were reverse-engineered from the
 stock firmware (`motor.ko`/`gpioStep.ko`). The lens is fixed — no motorized
 zoom/focus on this model.
 
+## Bit-banged Pelco-D sender (HI3516D_N81820)
+
+[`pelco-bb`](pelco-bb/) sends Pelco-D frames on the Xiongmai HI3516D_N81820's
+PTZ port by driving the UART1 pads as GPIOs, either as a complementary pair
+(a real differential signal on the RS-485 pair) or as a single inverted pad.
+It is a debugging instrument for when frames on `/dev/ttyAMA1` do not reach
+the head, with a procedure for checking the bus from a USB-RS485 adapter.
+
 ## Pelco-D configuration TUI
 
 [`pelcodtui`](pelcodtui/) is an ncurses interface for Pelco-D PTZ controller
