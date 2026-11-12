@@ -313,10 +313,10 @@ int motors_acquire(struct motors_client *client, enum motors_client_role role,
     return result;
 }
 
-int motors_move(struct motors_client *client, enum motors_client_axis axis,
-                enum motors_direction direction, unsigned duration_ms,
-                char *error, size_t error_size) {
-    if (!client || axis > MOTORS_IRIS || direction > MOTORS_CLOSE) {
+int motors_move_speed(struct motors_client *client, enum motors_client_axis axis,
+                      enum motors_direction direction, unsigned speed,
+                      unsigned duration_ms, char *error, size_t error_size) {
+    if (!client || axis > MOTORS_IRIS || direction > MOTORS_CLOSE || speed > 255) {
         set_error(error, error_size, "invalid move arguments");
         return -1;
     }
@@ -324,11 +324,20 @@ int motors_move(struct motors_client *client, enum motors_client_axis axis,
     json_object_object_add(request, "axis", json_object_new_string(axes[axis]));
     json_object_object_add(request, "direction",
                            json_object_new_string(directions[direction]));
+    if (speed > 0)
+        json_object_object_add(request, "speed", json_object_new_int64(speed));
     json_object_object_add(request, "duration_ms", json_object_new_int64(duration_ms));
     int result = send_object(client, request, error, error_size);
     if (result == 0 && duration_ms)
         client->completed_axes &= ~(1U << (unsigned)axis);
     return result;
+}
+
+int motors_move(struct motors_client *client, enum motors_client_axis axis,
+                enum motors_direction direction, unsigned duration_ms,
+                char *error, size_t error_size) {
+    return motors_move_speed(client, axis, direction, 0, duration_ms,
+                             error, error_size);
 }
 
 int motors_stop(struct motors_client *client, enum motors_client_axis axis,

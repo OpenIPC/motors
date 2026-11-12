@@ -3,6 +3,7 @@
 #include "motors_driver.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <json-c/json.h>
 #include <poll.h>
 #include <signal.h>
@@ -35,7 +36,7 @@ enum client_role {
 
 struct client {
     int fd;
-    enum client_role role;
+    enum client_role lease_role[MOTORS_AXIS_COUNT];
     bool subscribed;
     uint32_t leases;
     uint32_t active;
@@ -50,6 +51,7 @@ struct daemon_state {
     const char *driver_path;
     const char *driver_configuration;
     bool driver_ready;
+    uint64_t next_recovery_ms;
     double zoom_magnification;
     uint64_t zoom_observed_mono_ms;
     struct motors_driver_caps caps;
@@ -61,6 +63,9 @@ static unsigned driver_request_id;
 
 static void handle_driver_event(struct daemon_state *state,
                                 struct json_object *event);
+static int start_driver(struct daemon_state *state, const char *path,
+                        const char *configuration);
+static void reap_driver(struct daemon_state *state);
 
 static uint64_t now_ms(void) {
     struct timespec value;
@@ -267,7 +272,10 @@ static void clear_domain(struct daemon_state *state, uint32_t domain, bool clear
         if (clear_leases) state->clients[i].leases &= ~domain;
         for (unsigned axis = 0; axis < MOTORS_AXIS_COUNT; ++axis) {
             if (domain & MOTORS_AXIS_BIT(axis)) {
-                if (clear_leases) state->clients[i].lease_deadline_ms[axis] = 0;
+                if (clear_leases) {
+                    state->clients[i].lease_deadline_ms[axis] = 0;
+                    state->clients[i].lease_role[axis] = ROLE_NONE;
+                }
             }
         }
     }
@@ -386,14 +394,15 @@ static int driver_stop(struct daemon_state *state, uint32_t domain,
     return 0;
 }
 
-static struct client *owner_for(struct daemon_state *state, uint32_t domain,
-                                const struct client *except) {
-    for (unsigned i = 0; i < CLIENT_MAX; ++i) {
-        struct client *candidate = &state->clients[i];
-        if (candidate != except && candidate->fd >= 0 && (candidate->leases & domain))
-            return candidate;
+static enum client_role domain_owner_role(const struct client *owner,
+                                          uint32_t domain) {
+    enum client_role max_role = ROLE_NONE;
+    for (unsigned i = 0; i < MOTORS_AXIS_COUNT; ++i) {
+        uint32_t bit = MOTORS_AXIS_BIT(i);
+        if ((owner->leases & domain & bit) && owner->lease_role[i] > max_role)
+            max_role = owner->lease_role[i];
     }
-    return NULL;
+    return max_role;
 }
 
 static void send_lease_revoked(struct client *client, uint32_t domain,
@@ -478,26 +487,48 @@ static void handle_acquire(struct daemon_state *state, struct client *client,
         return;
     }
     uint32_t domain = stop_domain(state, axis);
-    struct client *owner = owner_for(state, domain, client);
+    enum client_role highest_owner_role = ROLE_NONE;
+    bool has_other_owner = false;
+    for (unsigned i = 0; i < CLIENT_MAX; ++i) {
+        struct client *candidate = &state->clients[i];
+        if (candidate != client && candidate->fd >= 0 && (candidate->leases & domain)) {
+            has_other_owner = true;
+            enum client_role cand_role = domain_owner_role(candidate, domain);
+            if (cand_role > highest_owner_role)
+                highest_owner_role = cand_role;
+        }
+    }
     bool preempted = false;
-    if (owner) {
-        if (role <= owner->role) {
-            send_response(client, id, false, "busy:%s", role_name(owner->role));
+    if (has_other_owner) {
+        if (role <= highest_owner_role) {
+            send_response(client, id, false, "busy:%s", role_name(highest_owner_role));
             return;
+        }
+        uint32_t revoked_by_client[CLIENT_MAX] = {0};
+        for (unsigned i = 0; i < CLIENT_MAX; ++i) {
+            struct client *candidate = &state->clients[i];
+            if (candidate != client && candidate->fd >= 0)
+                revoked_by_client[i] = candidate->leases & domain;
         }
         char error[160] = "";
         if (driver_stop(state, domain, error, sizeof(error), true) != 0) {
             send_response(client, id, false, "preempt stop failed:%s", error);
             return;
         }
-        if (owner->subscribed) send_lease_revoked(owner, domain, "preempted");
+        for (unsigned i = 0; i < CLIENT_MAX; ++i) {
+            struct client *candidate = &state->clients[i];
+            if (revoked_by_client[i] && candidate->subscribed)
+                send_lease_revoked(candidate, revoked_by_client[i], "preempted");
+        }
         preempted = true;
     }
-    client->role = role;
     client->leases |= domain;
     uint64_t deadline = now_ms() + lease_ms;
     for (unsigned i = 0; i < MOTORS_AXIS_COUNT; ++i) {
-        if (domain & MOTORS_AXIS_BIT(i)) client->lease_deadline_ms[i] = deadline;
+        if (domain & MOTORS_AXIS_BIT(i)) {
+            client->lease_role[i] = role;
+            client->lease_deadline_ms[i] = deadline;
+        }
     }
     send_response(client, id, true, preempted ? "acquired:preempted" : "acquired");
 }
@@ -523,10 +554,19 @@ static void handle_move(struct daemon_state *state, struct client *client,
         send_response(client, id, false, "invalid duration_ms");
         return;
     }
+    unsigned speed = 0;
+    struct json_object *speed_obj = NULL;
+    if (json_object_object_get_ex(request, "speed", &speed_obj) &&
+        (json_uint(request, "speed", &speed) != 0 || speed > 255)) {
+        send_response(client, id, false, "invalid speed");
+        return;
+    }
     char error[160] = "";
     struct json_object *driver_message = new_driver_request("move");
     json_object_object_add(driver_message, "axis", json_object_new_int(axis));
     json_object_object_add(driver_message, "direction", json_object_new_string(direction));
+    if (speed > 0)
+        json_object_object_add(driver_message, "speed", json_object_new_int64(speed));
     json_object_object_add(driver_message, "duration_ms", json_object_new_int64(duration_ms));
     struct json_object *driver_reply = driver_request(state, driver_message,
                                                        error, sizeof(error));
@@ -706,6 +746,17 @@ static void close_client(struct daemon_state *state, struct client *client) {
 
 static void process_deadlines(struct daemon_state *state) {
     uint64_t now = now_ms();
+    if (!state->driver_ready && state->next_recovery_ms &&
+        now >= state->next_recovery_ms) {
+        if (start_driver(state, state->driver_path,
+                         state->driver_configuration) == 0) {
+            state->next_recovery_ms = 0;
+            fprintf(stderr, "motor driver recovered after retry\n");
+        } else {
+            reap_driver(state);
+            state->next_recovery_ms = now_ms() + 1000;
+        }
+    }
     for (unsigned client_index = 0; client_index < CLIENT_MAX; ++client_index) {
         struct client *client = &state->clients[client_index];
         if (client->fd < 0) continue;
@@ -726,7 +777,7 @@ static void process_deadlines(struct daemon_state *state) {
 static int start_driver(struct daemon_state *state, const char *path,
                         const char *configuration) {
     int sockets[2];
-    if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sockets) != 0) return -1;
+    if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sockets) != 0) return -1;
     pid_t pid = fork();
     if (pid < 0) {
         close(sockets[0]);
@@ -735,6 +786,7 @@ static int start_driver(struct daemon_state *state, const char *path,
     }
     if (pid == 0) {
         close(sockets[0]);
+        (void)fcntl(sockets[1], F_SETFD, 0);
         char fd_text[24];
         snprintf(fd_text, sizeof(fd_text), "%d", sockets[1]);
         execl(path, path, "--fd", fd_text, "--config", configuration, (char *)NULL);
@@ -744,7 +796,7 @@ static int start_driver(struct daemon_state *state, const char *path,
     close(sockets[1]);
     state->driver_fd = sockets[0];
     state->driver_pid = pid;
-    struct timeval timeout = {.tv_sec = 1, .tv_usec = 0};
+    struct timeval timeout = {.tv_sec = 15, .tv_usec = 0};
     (void)setsockopt(state->driver_fd, SOL_SOCKET, SO_RCVTIMEO,
                      &timeout, sizeof(timeout));
     (void)setsockopt(state->driver_fd, SOL_SOCKET, SO_SNDTIMEO,
@@ -823,20 +875,26 @@ static void recover_driver(struct daemon_state *state) {
     reap_driver(state);
     clear_domain(state, lost_axes, true);
     for (unsigned attempt = 0; attempt < DRIVER_RESTART_MAX; ++attempt) {
+        if (attempt > 0) {
+            struct timespec ts = {.tv_sec = 0, .tv_nsec = 50000000L};
+            nanosleep(&ts, NULL);
+        }
         if (start_driver(state, state->driver_path,
                          state->driver_configuration) == 0) {
+            state->next_recovery_ms = 0;
             fprintf(stderr, "motor driver recovered on attempt %u\n",
                     attempt + 1);
             return;
         }
         reap_driver(state);
     }
-    fprintf(stderr, "driver recovery failed after %u attempts\n",
+    state->next_recovery_ms = now_ms() + 1000;
+    fprintf(stderr, "driver recovery failed after %u attempts; scheduling retry\n",
             DRIVER_RESTART_MAX);
 }
 
 static int open_server(struct daemon_state *state) {
-    state->server = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK, 0);
+    state->server = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if (state->server < 0) return -1;
     struct sockaddr_un address;
     memset(&address, 0, sizeof(address));
@@ -946,7 +1004,7 @@ int main(int argc, char **argv) {
             break;
         }
         if (descriptors[0].revents & POLLIN) {
-            int client_fd = accept4(state.server, NULL, NULL, SOCK_NONBLOCK);
+            int client_fd = accept4(state.server, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
             if (client_fd >= 0) {
                 unsigned slot = CLIENT_MAX;
                 for (unsigned i = 0; i < CLIENT_MAX; ++i) {

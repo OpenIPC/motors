@@ -45,7 +45,7 @@ int main(int argc, char **argv) {
         rc = motors_stop_all(client, error, sizeof(error));
     } else if (!strcmp(action, "preset")) {
         const char *preset_val = arg_val ? arg_val : "1";
-        rc = motors_command(client, "preset", preset_val, error, sizeof(error));
+        rc = motors_command(client, "preset.call", preset_val, error, sizeof(error));
     } else if (!strcmp(action, "ircut")) {
         const char *ircut_val = arg_val ? arg_val : "day";
         rc = motors_command(client, "ircut", ircut_val, error, sizeof(error));

@@ -350,7 +350,8 @@ static bool valid_direction(unsigned axis, const char *direction) {
     }
 }
 
-static int send_move(struct driver_state *state, unsigned axis, const char *dir) {
+static int send_move(struct driver_state *state, unsigned axis, const char *dir,
+                     unsigned speed) {
     uint8_t c1 = 0, c2 = 0, d1 = 0, d2 = 0;
     state->cancel_mcu_af_at_ms = 0;
     state->cancel_mcu_af_stop_ms = 0;
@@ -361,11 +362,11 @@ static int send_move(struct driver_state *state, unsigned axis, const char *dir)
         state->zoom_was_active = false;
     switch ((enum motors_axis)axis) {
     case MOTORS_AXIS_PAN:
-        d1 = (uint8_t)state->config.pan_speed;
+        d1 = (uint8_t)(speed ? speed : state->config.pan_speed);
         c2 = !strcmp(dir, "left") ? 0x04 : 0x02;
         break;
     case MOTORS_AXIS_TILT:
-        d2 = (uint8_t)state->config.tilt_speed;
+        d2 = (uint8_t)(speed ? speed : state->config.tilt_speed);
         c2 = !strcmp(dir, "up") ? 0x08 : 0x10;
         break;
     case MOTORS_AXIS_ZOOM:
@@ -463,19 +464,27 @@ static int handle_request(struct driver_state *state, struct json_object *reques
     if (!strcmp(operation, "move")) {
         unsigned axis = json_uint(request, "axis", MOTORS_AXIS_COUNT);
         const char *direction = json_string(request, "direction");
+        unsigned speed = json_uint(request, "speed", 0);
         unsigned duration = json_uint(request, "duration_ms", 0);
-        if (!valid_direction(axis, direction))
+        if (!valid_direction(axis, direction) || speed > 255)
             return send_reply(state->control_fd, id, false, "invalid movement");
-        if (send_move(state, axis, direction) != 0) {
+        if (send_move(state, axis, direction, speed) != 0) {
             char error[160];
             snprintf(error, sizeof(error), "transport write failed: %s",
                      strerror(errno));
             (void)send_reply(state->control_fd, id, false, error);
             return -1;
         }
+        uint32_t interrupted = 0;
+        for (unsigned a = 0; a < MOTORS_AXIS_COUNT; ++a) {
+            if (state->deadlines[a] && (a != axis || !duration))
+                interrupted |= MOTORS_AXIS_BIT(a);
+        }
         state->active = ANJOY_ALL_AXES;
         memset(state->deadlines, 0, sizeof(state->deadlines));
         if (duration) state->deadlines[axis] = now_ms() + duration;
+        if (interrupted && send_movement_event(state->control_fd, interrupted) != 0)
+            return -1;
         return send_reply(state->control_fd, id, true, "sent");
     }
 
@@ -582,8 +591,8 @@ static int parse_telemetry(struct driver_state *state) {
             state->rx_buf[6] == 0x0b && state->rx_buf[7] == 0x1a) {
             double mag = -1.0;
             if (payload_len == 7 && state->rx_buf[8] <= 9) {
-                /* Sub-1.0x overshoot frame */
-                mag = 1.0;
+                /* Single-digit zoom magnification (1x..9x; 0 clamps to 1.0x) */
+                mag = state->rx_buf[8] >= 1 ? (double)state->rx_buf[8] : 1.0;
             } else if (payload_len >= 8 && state->rx_buf[8] <= 9 && state->rx_buf[9] <= 9) {
                 /* Anjoy zoom telemetry: byte 8 is tens (0..9), byte 9 is units (0..9) e.g. 0x04, 0x01 = 41x */
                 mag = (double)state->rx_buf[8] * 10.0 + (double)state->rx_buf[9];
@@ -773,6 +782,10 @@ int main(int argc, char **argv) {
             break;
         }
         if (!result) continue;
+        if (descriptors[1].revents & (POLLHUP | POLLERR | POLLNVAL)) {
+            exit_code = 1;
+            break;
+        }
         if (descriptors[1].revents & POLLIN && read_uart(&state) != 0) {
             exit_code = 1;
             break;

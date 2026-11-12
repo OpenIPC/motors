@@ -42,10 +42,14 @@ int pct_named_command(const struct pct_transport *transport, const char *name,
   struct motors_client *client = NULL;
   char error[160] = "";
   char wire_name[128];
-  size_t i = 0;
-  for (; name[i] && i + 1 < sizeof(wire_name); i++)
-    wire_name[i] = name[i] == '_' ? '.' : name[i];
-  wire_name[i] = '\0';
+  if (strchr(name, '.')) {
+    snprintf(wire_name, sizeof(wire_name), "%s", name);
+  } else {
+    size_t i = 0;
+    for (; name[i] && i + 1 < sizeof(wire_name); i++)
+      wire_name[i] = name[i] == '_' ? '.' : name[i];
+    wire_name[i] = '\0';
+  }
   if (motors_open(&client, transport->socket_path, error, sizeof(error)) != 0 ||
       motors_command(client, wire_name, value, error, sizeof(error)) != 0) {
     snprintf(summary, n, "motorsd: %s", error[0] ? error : "command failed");
@@ -353,7 +357,8 @@ int pct_motion_start(struct pct_motion *motion,
         motors_open(&client, transport->socket_path, error, sizeof(error)) != 0 ||
         motors_acquire(client, MOTORS_MANUAL, axis, 6000, error,
                        sizeof(error)) != 0 ||
-        motors_move(client, axis, direction, 0, error, sizeof(error)) != 0) {
+        motors_move_speed(client, axis, direction, speed, 0, error,
+                          sizeof(error)) != 0) {
       snprintf(summary, n, "motorsd: %s", error[0] ? error : "invalid movement");
       motors_close(client);
       return -1;

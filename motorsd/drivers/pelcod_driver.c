@@ -81,6 +81,7 @@ static speed_t baud_value(unsigned baud) {
 
 static int parse_uint(const char *text, unsigned minimum, unsigned maximum,
                       unsigned *result) {
+    if (!text || !*text) return -1;
     char *end = NULL;
     errno = 0;
     unsigned long value = strtoul(text, &end, 10);
@@ -314,20 +315,20 @@ static int send_stop(struct driver_state *state) {
 }
 
 static int send_move(struct driver_state *state, unsigned axis,
-                     const char *direction) {
+                     const char *direction, unsigned speed) {
     uint8_t command1 = 0, command2 = 0, data1 = 0, data2 = 0;
     switch (axis) {
     case MOTORS_AXIS_PAN:
         if (!strcmp(direction, "left")) command2 = 0x04;
         else if (!strcmp(direction, "right")) command2 = 0x02;
         else return -1;
-        data1 = (uint8_t)state->config.pan_speed;
+        data1 = (uint8_t)(speed ? speed : state->config.pan_speed);
         break;
     case MOTORS_AXIS_TILT:
         if (!strcmp(direction, "up")) command2 = 0x08;
         else if (!strcmp(direction, "down")) command2 = 0x10;
         else return -1;
-        data2 = (uint8_t)state->config.tilt_speed;
+        data2 = (uint8_t)(speed ? speed : state->config.tilt_speed);
         break;
     case MOTORS_AXIS_ZOOM:
         if (!strcmp(direction, "tele")) command2 = 0x20;
@@ -804,20 +805,28 @@ static int handle_request(struct driver_state *state, struct json_object *reques
     if (!strcmp(operation, "move")) {
         unsigned axis = json_uint(request, "axis", MOTORS_AXIS_COUNT);
         const char *direction = json_string(request, "direction");
+        unsigned speed = json_uint(request, "speed", 0);
         unsigned duration = json_uint(request, "duration_ms", 0);
-        if (!valid_direction(axis, direction))
+        if (!valid_direction(axis, direction) || speed > 255)
             return send_reply(state->control_fd, id, false,
                               "invalid movement");
-        if (send_move(state, axis, direction) != 0) {
+        if (send_move(state, axis, direction, speed) != 0) {
             char error[160];
             snprintf(error, sizeof(error), "transport write failed: %s",
                      strerror(errno));
             (void)send_reply(state->control_fd, id, false, error);
             return -1;
         }
+        uint32_t interrupted = 0;
+        for (unsigned a = 0; a < MOTORS_AXIS_COUNT; ++a) {
+            if (state->deadlines[a] && (a != axis || !duration))
+                interrupted |= MOTORS_AXIS_BIT(a);
+        }
         state->active = 0x0f;
         memset(state->deadlines, 0, sizeof(state->deadlines));
         if (duration) state->deadlines[axis] = now_ms() + duration;
+        if (interrupted && send_event(state->control_fd, interrupted) != 0)
+            return -1;
         return send_reply(state->control_fd, id, true, "sent");
     }
     if (!strcmp(operation, "stop")) {
@@ -936,6 +945,10 @@ int main(int argc, char **argv) {
             break;
         }
         if (!result) continue;
+        if (descriptors[1].revents & (POLLHUP | POLLERR | POLLNVAL)) {
+            exit_code = 1;
+            break;
+        }
         if (descriptors[1].revents & POLLIN && read_telemetry(&state) != 0) {
             exit_code = 1;
             break;

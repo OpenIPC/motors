@@ -97,13 +97,13 @@ int main(int argc, char **argv) {
                socket_path);
       int result = pct_ui_run(&ui, &service_profile, &transport);
       endwin();
-      return result;
+      return result == 2 ? 0 : result;
     }
     snprintf(ui.message, sizeof(ui.message), "Settings unavailable: %s",
              service_error[0] ? service_error : "driver has no settings");
     int result = generic_tui(&ui, dry, true, socket_path);
     endwin();
-    return result;
+    return result == 2 ? 0 : result;
   }
 
   initscr(); cbreak(); noecho(); keypad(stdscr, TRUE);
@@ -128,7 +128,7 @@ int main(int argc, char **argv) {
                       sizeof(state_error));
     }
     if (generic || !strcmp(profile, "generic")) {
-      int result = generic_tui(&ui, dry, !direct, socket_path);
+      int result = generic_tui(&ui, dry, false, socket_path);
       if (result == 2) { profile = NULL; continue; }
       endwin(); return result;
     }
@@ -146,7 +146,7 @@ int main(int argc, char **argv) {
     }
     struct pct_transport t;
     configure_transport(&t, &p, dry);
-    t.use_motorsd = !direct;
+    t.use_motorsd = false;
     snprintf(t.socket_path, sizeof(t.socket_path), "%s", socket_path);
     int result = pct_ui_run(&ui, &p, &t);
     if (result == 2) { profile = NULL; continue; }

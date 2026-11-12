@@ -1,6 +1,8 @@
 CC ?= cc
 CFLAGS ?= -O2 -Wall -Wextra -Werror
-CPPFLAGS += -D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L -Isrc -I../motorsd/include
+JSON_CFLAGS ?= $(shell pkg-config --cflags json-c 2>/dev/null || echo "-I../../json-c/include -I../../json-c/build")
+LDLIBS_JSON ?= $(shell pkg-config --libs json-c 2>/dev/null || echo "-L../../json-c/build -ljson-c")
+CPPFLAGS += -D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L -Isrc -I../motorsd/include $(JSON_CFLAGS)
 NCURSES_LIBS ?= -lncurses
 PREFIX ?= /usr
 SYSCONFDIR ?= /etc
@@ -28,10 +30,10 @@ $(BUILD)/libmotors.o: ../motorsd/src/libmotors.c ../motorsd/include/libmotors.h 
 $(BUILD)/main.o $(UI): src/tui_internal.h
 
 $(BUILD)/pelcodtui: $(BUILD)/main.o $(UI) $(CORE)
-	$(CC) $(LDFLAGS) $^ $(NCURSES_LIBS) -ljson-c -o $@
+	$(CC) $(LDFLAGS) $^ $(NCURSES_LIBS) $(LDLIBS_JSON) -o $@
 
 $(BUILD)/test_core: tests/test_core.c $(CORE)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $^ -lutil -ljson-c -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $^ -lutil $(LDLIBS_JSON) -o $@
 
 test: $(BUILD)/pelcodtui $(BUILD)/test_core
 	@for profile in cameras/*.conf; do \

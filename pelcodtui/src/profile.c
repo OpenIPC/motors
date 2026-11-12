@@ -38,8 +38,10 @@ static int add_section(struct pct_profile *p, const char *section) {
 static int add_json_string(struct pct_profile *p, const char *section,
                            struct json_object *object, const char *key) {
     struct json_object *value = NULL;
-    if (!json_object_object_get_ex(object, key, &value)) return 0;
-    return add(p, section, key, json_object_get_string(value));
+    if (!json_object_object_get_ex(object, key, &value) ||
+        json_object_is_type(value, json_type_null)) return 0;
+    const char *text = json_object_get_string(value);
+    return text ? add(p, section, key, text) : 0;
 }
 
 static int add_json_array(struct pct_profile *p, const char *section,
@@ -74,7 +76,9 @@ int pct_profile_from_description(struct pct_profile *p, const char *json,
         !json_object_object_get_ex(root, "ok", &ok) ||
         !json_object_get_boolean(ok) ||
         !json_object_object_get_ex(root, "profile", &profile) ||
+        !json_object_is_type(profile, json_type_string) ||
         !json_object_object_get_ex(root, "label", &label) ||
+        !json_object_is_type(label, json_type_string) ||
         !json_object_object_get_ex(root, "menus", &menus) ||
         !json_object_is_type(menus, json_type_array) ||
         !json_object_object_get_ex(root, "controls", &controls) ||
@@ -94,8 +98,11 @@ int pct_profile_from_description(struct pct_profile *p, const char *json,
     for (size_t i = 0; i < json_object_array_length(menus); ++i) {
         struct json_object *menu = json_object_array_get_idx(menus, i), *id = NULL;
         char section[128];
-        if (!json_object_object_get_ex(menu, "id", &id)) goto invalid;
-        snprintf(section, sizeof(section), "menu.%s", json_object_get_string(id));
+        if (!json_object_object_get_ex(menu, "id", &id) ||
+            !json_object_is_type(id, json_type_string)) goto invalid;
+        const char *menu_id = json_object_get_string(id);
+        if (!menu_id || !*menu_id) goto invalid;
+        snprintf(section, sizeof(section), "menu.%s", menu_id);
         if (add_section(p, section) || add_json_string(p, section, menu, "label") ||
             add_json_array(p, section, menu, "items", NULL)) goto too_large;
     }
@@ -103,27 +110,37 @@ int pct_profile_from_description(struct pct_profile *p, const char *json,
         struct json_object *control = json_object_array_get_idx(controls, i);
         struct json_object *id = NULL, *type = NULL;
         if (!json_object_object_get_ex(control, "id", &id) ||
-            !json_object_object_get_ex(control, "type", &type)) goto invalid;
-        bool action = !strcmp(json_object_get_string(type), "action");
+            !json_object_is_type(id, json_type_string) ||
+            !json_object_object_get_ex(control, "type", &type) ||
+            !json_object_is_type(type, json_type_string)) goto invalid;
+        const char *control_id = json_object_get_string(id);
+        const char *type_str = json_object_get_string(type);
+        if (!control_id || !*control_id || !type_str) goto invalid;
+        bool action = !strcmp(type_str, "action");
         char section[128];
         snprintf(section, sizeof(section), "%s.%s", action ? "action" : "setting",
-                 json_object_get_string(id));
+                 control_id);
         if (add_section(p, section)) goto too_large;
-        const char *keys[] = {"type", "label", "description", "default", "unit",
+        const char *keys[] = {"name", "type", "label", "description", "default", "unit",
                               "warning", "min", "max", "step", "confirm"};
         for (size_t k = 0; k < sizeof(keys) / sizeof(keys[0]); ++k)
             if ((!action || strcmp(keys[k], "type")) &&
                 add_json_string(p, section, control, keys[k])) goto too_large;
         struct json_object *options = NULL;
         if (json_object_object_get_ex(control, "options", &options)) {
+            if (!json_object_is_type(options, json_type_array)) goto invalid;
             if (add_json_array(p, section, control, "options", "value")) goto too_large;
             for (size_t j = 0; j < json_object_array_length(options); ++j) {
                 struct json_object *option = json_object_array_get_idx(options, j);
                 struct json_object *value = NULL, *option_label = NULL;
-                if (!json_object_object_get_ex(option, "value", &value)) goto invalid;
+                if (!json_object_object_get_ex(option, "value", &value) ||
+                    !json_object_is_type(value, json_type_string)) goto invalid;
+                const char *val_str = json_object_get_string(value);
+                if (!val_str) goto invalid;
                 char key[192];
-                snprintf(key, sizeof(key), "option.%s.label", json_object_get_string(value));
+                snprintf(key, sizeof(key), "option.%s.label", val_str);
                 if (json_object_object_get_ex(option, "label", &option_label) &&
+                    json_object_is_type(option_label, json_type_string) &&
                     add(p, section, key, json_object_get_string(option_label))) goto too_large;
             }
         }

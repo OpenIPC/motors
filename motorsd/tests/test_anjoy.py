@@ -156,8 +156,16 @@ keepalive_ms=200
             assert telemetry_pkt["event"] == "telemetry"
             assert abs(telemetry_pkt["value"] - 60.0) < 0.05, f"Unexpected mag: {telemetry_pkt['value']}"
 
-            # 14-byte sub-1.0 overshoot report: 51 01 04 78 01 07 0B 1A 08 21 26 26 26 CK -> clamped to 1.0
-            report = bytearray(bytes.fromhex("5101047801070b1a082126262600"))
+            # 14-byte single-digit zoom report: 51 01 04 78 01 07 0B 1A 05 21 26 26 26 CK -> 5.0x
+            report = bytearray(bytes.fromhex("5101047801070b1a052126262600"))
+            report[13] = sum(report[:13]) & 0xff
+            os.write(master, report)
+            telemetry_pkt = json.loads(parent.recv(4096))
+            assert telemetry_pkt["event"] == "telemetry"
+            assert abs(telemetry_pkt["value"] - 5.0) < 0.05, f"Unexpected mag: {telemetry_pkt['value']}"
+
+            # 14-byte sub-1.0 overshoot report: 51 01 04 78 01 07 0B 1A 00 21 26 26 26 CK -> clamped to 1.0
+            report = bytearray(bytes.fromhex("5101047801070b1a002126262600"))
             report[13] = sum(report[:13]) & 0xff
             os.write(master, report)
             telemetry_pkt = json.loads(parent.recv(4096))

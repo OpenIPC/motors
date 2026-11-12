@@ -350,10 +350,11 @@ static void apply_item(struct pct_ui_context *ui, const struct pct_profile *p,
   if (!i->action && choose_value(ui, p, i, value, sizeof(value)))
     return;
   if (t->use_motorsd) {
-    if (pct_named_command(t, i->id, i->action ? NULL : value,
+    const char *wire_name = pct_ui_nz(pct_get(p, i->section, "name"), i->id);
+    if (pct_named_command(t, wire_name, i->action ? NULL : value,
                           ui->message, sizeof(ui->message)))
       return;
-    snprintf(cmd, sizeof(cmd), "motorsd:%s", i->id);
+    snprintf(cmd, sizeof(cmd), "motorsd:%s", wire_name);
   } else {
     if (i->action) {
       const char *raw_cmd = pct_get(p, i->section, "command");
