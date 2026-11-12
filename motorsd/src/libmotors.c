@@ -29,7 +29,7 @@ struct motors_client {
 static const char *const axes[] = {"pan", "tilt", "zoom", "focus", "iris"};
 static const char *const roles[] = {"automation", "af", "manual"};
 static const char *const directions[] = {
-    "left", "right", "up", "down", "tele", "wide", "near", "far"
+    "left", "right", "up", "down", "tele", "wide", "near", "far", "open", "close"
 };
 
 static void set_error(char *error, size_t size, const char *message) {
@@ -316,7 +316,7 @@ int motors_acquire(struct motors_client *client, enum motors_client_role role,
 int motors_move(struct motors_client *client, enum motors_client_axis axis,
                 enum motors_direction direction, unsigned duration_ms,
                 char *error, size_t error_size) {
-    if (!client || axis > MOTORS_IRIS || direction > MOTORS_FAR) {
+    if (!client || axis > MOTORS_IRIS || direction > MOTORS_CLOSE) {
         set_error(error, error_size, "invalid move arguments");
         return -1;
     }

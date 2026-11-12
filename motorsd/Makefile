@@ -1,16 +1,17 @@
 CC ?= cc
-JSON_CFLAGS ?= $(shell pkg-config --cflags json-c)
+JSON_CFLAGS ?= $(shell pkg-config --cflags json-c 2>/dev/null || echo "-I../../json-c/include -I../../json-c/build")
 CPPFLAGS += -Iinclude $(JSON_CFLAGS)
 CFLAGS ?= -O2 -g
 CFLAGS += -std=c11 -Wall -Wextra -Werror
-LDLIBS_JSON ?= $(shell pkg-config --libs json-c)
+LDLIBS_JSON ?= $(shell pkg-config --libs json-c 2>/dev/null || echo "-L../../json-c/build -ljson-c")
 
 BUILD ?= build
 CAMERA_BUILD := build-camera
 SIBLING_CAMERA_CC := ../../firmware/output/host/bin/arm-openipc-linux-musleabi-gcc
 CAMERA_CC ?= $(if $(wildcard $(SIBLING_CAMERA_CC)),$(SIBLING_CAMERA_CC),arm-openipc-linux-musleabi-gcc)
-PROGRAMS := $(BUILD)/motorsd $(BUILD)/motorsctl $(BUILD)/mock_driver \
-	$(BUILD)/pelcod_driver \
+PROGRAMS := $(BUILD)/motorsd $(BUILD)/motorsctl $(BUILD)/motors-cli \
+	$(BUILD)/mock_driver \
+	$(BUILD)/pelcod_driver $(BUILD)/anjoy_driver \
 	$(BUILD)/libmotors.a $(BUILD)/test_libmotors \
 	$(BUILD)/test_libmotors_preemption
 
@@ -26,6 +27,10 @@ $(BUILD)/motorsd: src/motorsd.c include/motors_driver.h | $(BUILD)
 
 $(BUILD)/motorsctl: src/motorsctl.c | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ src/motorsctl.c
+
+$(BUILD)/motors-cli: src/motors_cli.c $(BUILD)/libmotors.a | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ src/motors_cli.c \
+		$(BUILD)/libmotors.a $(LDLIBS_JSON)
 
 $(BUILD)/libmotors.o: src/libmotors.c include/libmotors.h | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ src/libmotors.c
@@ -47,6 +52,9 @@ $(BUILD)/mock_driver: drivers/mock_driver.c include/motors_driver.h | $(BUILD)
 
 $(BUILD)/pelcod_driver: drivers/pelcod_driver.c include/motors_driver.h | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ drivers/pelcod_driver.c $(LDLIBS_JSON)
+
+$(BUILD)/anjoy_driver: drivers/anjoy_driver.c include/motors_driver.h | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ drivers/anjoy_driver.c $(LDLIBS_JSON) -lm
 
 test: all
 	python3 tests/test_architecture.py

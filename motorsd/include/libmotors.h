@@ -39,6 +39,8 @@ enum motors_direction {
     MOTORS_WIDE,
     MOTORS_NEAR,
     MOTORS_FAR,
+    MOTORS_OPEN,
+    MOTORS_CLOSE,
 };
 
 int motors_open(struct motors_client **client, const char *socket_path,
