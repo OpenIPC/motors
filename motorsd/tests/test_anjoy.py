@@ -115,6 +115,25 @@ keepalive_ms=200
             stop_frame = read_exact(master, 7)
             assert stop_frame == bytes.fromhex("ff010000000001"), f"Bad stop: {stop_frame.hex()}"
 
+            # 8b. Preset commands (preset.call, preset.set, preset.clear, and invalid preset/ircut validation)
+            parent.send(json.dumps({"version": 1, "id": "p1", "op": "command", "name": "preset.call", "value": "5"}).encode())
+            reply = json.loads(parent.recv(4096))
+            assert reply["ok"] is True
+            assert read_exact(master, 7) == bytes.fromhex("ff01000700050d")
+
+            parent.send(json.dumps({"version": 1, "id": "p2", "op": "command", "name": "preset.set", "value": "5"}).encode())
+            reply = json.loads(parent.recv(4096))
+            assert reply["ok"] is True
+            assert read_exact(master, 7) == bytes.fromhex("ff010003000509")
+
+            parent.send(json.dumps({"version": 1, "id": "p3", "op": "command", "name": "preset", "value": "0"}).encode())
+            reply = json.loads(parent.recv(4096))
+            assert reply["ok"] is False
+
+            parent.send(json.dumps({"version": 1, "id": "ic1", "op": "command", "name": "ircut", "value": "bogus"}).encode())
+            reply = json.loads(parent.recv(4096))
+            assert reply["ok"] is False
+
             # 9. Telemetry report from MCU:
             # 15 bytes: 51 01 04 78 01 08 0B 1A ZZ ZZ 21 26 26 26 CK
             # Zoom 25x: byte 8 = 0x02, byte 9 = 0x05

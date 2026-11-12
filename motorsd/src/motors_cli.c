@@ -14,6 +14,7 @@ static void usage(const char *name) {
 int main(int argc, char **argv) {
     const char *socket_path = "/run/motorsd.sock";
     const char *action = NULL;
+    const char *arg_val = NULL;
     unsigned duration_ms = 0;
 
     for (int i = 1; i < argc; ++i) {
@@ -21,7 +22,8 @@ int main(int argc, char **argv) {
             socket_path = argv[++i];
         } else if (!action) {
             action = argv[i];
-        } else if (!duration_ms) {
+        } else if (!arg_val) {
+            arg_val = argv[i];
             duration_ms = (unsigned)atoi(argv[i]);
         }
     }
@@ -42,10 +44,10 @@ int main(int argc, char **argv) {
     if (!strcmp(action, "stop")) {
         rc = motors_stop_all(client, error, sizeof(error));
     } else if (!strcmp(action, "preset")) {
-        const char *preset_val = argc > 2 ? argv[2] : "1";
+        const char *preset_val = arg_val ? arg_val : "1";
         rc = motors_command(client, "preset", preset_val, error, sizeof(error));
     } else if (!strcmp(action, "ircut")) {
-        const char *ircut_val = argc > 2 ? argv[2] : "day";
+        const char *ircut_val = arg_val ? arg_val : "day";
         rc = motors_command(client, "ircut", ircut_val, error, sizeof(error));
     } else {
         enum motors_client_axis axis;

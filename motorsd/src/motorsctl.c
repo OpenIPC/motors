@@ -64,15 +64,21 @@ int main(int argc, char **argv) {
             break;
         }
         char response[MESSAGE_MAX + 1];
-        ssize_t received = recv(fd, response, MESSAGE_MAX, 0);
-        if (received <= 0) {
-            fprintf(stderr, "receive response: %s\n", strerror(errno));
-            exit_code = 1;
+        for (;;) {
+            ssize_t received = recv(fd, response, MESSAGE_MAX, 0);
+            if (received <= 0) {
+                fprintf(stderr, "receive response: %s\n", strerror(errno));
+                exit_code = 1;
+                break;
+            }
+            response[received] = '\0';
+            puts(response);
+            if (strstr(response, "\"event\":") && !strstr(response, "\"ok\":"))
+                continue;
+            if (!strstr(response, "\"ok\":true")) exit_code = 1;
             break;
         }
-        response[received] = '\0';
-        puts(response);
-        if (!strstr(response, "\"ok\":true")) exit_code = 1;
+        if (exit_code) break;
     }
     if (!exit_code && wait_event) {
         char event[MESSAGE_MAX + 1];

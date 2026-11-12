@@ -257,7 +257,7 @@ static size_t make_frame(const struct configuration *config,
     output[4] = data1;
     output[5] = data2;
     unsigned sum = address + command1 + command2 + data1 + data2;
-    output[6] = (uint8_t)(config->pelco_xm ? sum % 100U : sum);
+    output[6] = (uint8_t)sum;
     if (config->pelco_xm) output[7] = 0x5c;
     return config->pelco_xm ? 8U : 7U;
 }
@@ -335,9 +335,15 @@ static int send_move(struct driver_state *state, unsigned axis,
         else return -1;
         break;
     case MOTORS_AXIS_FOCUS:
-        if (!strcmp(direction, "near")) command1 = 0x01;
-        else if (!strcmp(direction, "far")) command2 = 0x80;
-        else return -1;
+        if (!strcmp(direction, "near")) {
+            if (state->config.pelco_xm) command2 = 0x80;
+            else command1 = 0x01;
+        } else if (!strcmp(direction, "far")) {
+            if (state->config.pelco_xm) command1 = 0x01;
+            else command2 = 0x80;
+        } else {
+            return -1;
+        }
         break;
     default:
         return -1;
@@ -455,7 +461,7 @@ static int read_telemetry(struct driver_state *state) {
                     char *end = NULL;
                     double value = strtod(state->telemetry + 1, &end);
                     state->telemetry_length = 0;
-                    if (end && *end == '\0' && value >= 1.0 && value < 40.0 &&
+                    if (end && *end == '\0' && value >= 1.0 && value <= 1000.0 &&
                         send_zoom_magnification(state, value) != 0)
                         return -1;
                 } else if ((isdigit(byte) || byte == '.') &&
@@ -568,13 +574,15 @@ static int send_description(const struct driver_state *state, const char *id) {
                 profile_get(&state->config, section, "items")));
             json_object_array_add(menus, entry);
         } else if (setting || action) {
+            const char *type = profile_get(&state->config, section, "type");
+            if (setting && !type) continue;
             char name[128];
             external_name(item_id, name, sizeof(name));
             struct json_object *entry = json_object_new_object();
             json_object_object_add(entry, "name", json_object_new_string(name));
             json_object_object_add(entry, "id", json_object_new_string(item_id));
             json_object_object_add(entry, "type", json_object_new_string(
-                action ? "action" : profile_get(&state->config, section, "type")));
+                action ? "action" : type));
             add_string_if(entry, "label", &state->config, section, "label");
             add_string_if(entry, "description", &state->config, section,
                           "description");
@@ -587,8 +595,7 @@ static int send_description(const struct driver_state *state, const char *id) {
             const char *confirm = profile_get(&state->config, section, "confirm");
             if (confirm) json_object_object_add(entry, "confirm",
                 json_object_new_boolean(!strcmp(confirm, "true")));
-            if (setting && strcmp(profile_get(&state->config, section, "type"),
-                                  "number")) {
+            if (setting && strcmp(type, "number")) {
                 struct json_object *options = json_object_new_array();
                 const char *list = profile_get(&state->config, section, "options");
                 char copy[512];

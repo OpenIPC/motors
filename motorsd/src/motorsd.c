@@ -50,6 +50,8 @@ struct daemon_state {
     const char *driver_path;
     const char *driver_configuration;
     bool driver_ready;
+    double zoom_magnification;
+    uint64_t zoom_observed_mono_ms;
     struct motors_driver_caps caps;
     struct client clients[CLIENT_MAX];
 };
@@ -125,6 +127,22 @@ static int json_uint(struct json_object *request, const char *key, unsigned *res
     return 0;
 }
 
+static int send_client_packet(struct client *client, const char *text) {
+    if (!client || client->fd < 0 || !text) return -1;
+    size_t length = strlen(text);
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        ssize_t sent = send(client->fd, text, length, MSG_NOSIGNAL);
+        if (sent >= 0) return 0;
+        if (errno == EINTR) continue;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            struct pollfd pfd = {.fd = client->fd, .events = POLLOUT};
+            if (poll(&pfd, 1, 20) > 0) continue;
+        }
+        break;
+    }
+    return -1;
+}
+
 static void send_response(struct client *client, const char *id, bool ok,
                           const char *format, ...) {
     struct json_object *response = json_object_new_object();
@@ -142,7 +160,7 @@ static void send_response(struct client *client, const char *id, bool ok,
                                json_object_new_string(detail));
     }
     const char *text = json_object_to_json_string_ext(response, JSON_C_TO_STRING_PLAIN);
-    (void)send(client->fd, text, strlen(text), MSG_NOSIGNAL);
+    (void)send_client_packet(client, text);
     json_object_put(response);
 }
 
@@ -161,7 +179,7 @@ static void send_driver_success(struct client *client, const char *id,
         json_object_object_add(response, "driver_completed_mono_ms",
                                json_object_get(completed));
     const char *text = json_object_to_json_string_ext(response, JSON_C_TO_STRING_PLAIN);
-    (void)send(client->fd, text, strlen(text), MSG_NOSIGNAL);
+    (void)send_client_packet(client, text);
     json_object_put(response);
 }
 
@@ -174,7 +192,7 @@ static void forward_driver_reply(struct client *client, const char *id,
     json_object_object_add(response, "version", json_object_new_int(1));
     const char *text = json_object_to_json_string_ext(response,
                                                        JSON_C_TO_STRING_PLAIN);
-    (void)send(client->fd, text, strlen(text), MSG_NOSIGNAL);
+    (void)send_client_packet(client, text);
     json_object_put(response);
 }
 
@@ -184,6 +202,7 @@ static struct json_object *driver_request(struct daemon_state *state,
     const char *text = json_object_to_json_string_ext(request, JSON_C_TO_STRING_PLAIN);
     if (send(state->driver_fd, text, strlen(text), MSG_NOSIGNAL) < 0) {
         state->driver_ready = false;
+        if (state->driver_pid > 0) kill(state->driver_pid, SIGKILL);
         snprintf(error, error_size, "driver send: %s", strerror(errno));
         return NULL;
     }
@@ -192,8 +211,14 @@ static struct json_object *driver_request(struct daemon_state *state,
     for (;;) {
         ssize_t length = recv(state->driver_fd, message, MESSAGE_MAX, 0);
         if (length <= 0) {
+            int saved_err = length < 0 ? errno : 0;
             state->driver_ready = false;
-            snprintf(error, error_size, "driver disconnected");
+            if (saved_err == EAGAIN || saved_err == EWOULDBLOCK) {
+                if (state->driver_pid > 0) kill(state->driver_pid, SIGKILL);
+                snprintf(error, error_size, "driver timeout");
+            } else {
+                snprintf(error, error_size, "driver disconnected");
+            }
             return NULL;
         }
         message[length] = '\0';
@@ -265,6 +290,8 @@ static void handle_driver_event(struct daemon_state *state,
              !json_object_is_type(value, json_type_int))) return;
         double parsed = json_object_get_double(value);
         if (parsed < 1.0 || parsed > 1000.0) return;
+        state->zoom_magnification = parsed;
+        state->zoom_observed_mono_ms = now_ms();
 
         struct json_object *message = json_object_new_object();
         json_object_object_add(message, "version", json_object_new_int(1));
@@ -399,8 +426,36 @@ static void handle_capabilities(struct daemon_state *state, struct client *clien
     json_object_object_add(response, "raw", json_object_new_boolean(state->caps.supports_raw));
     json_object_object_add(response, "available", json_object_new_boolean(state->driver_ready));
     const char *text = json_object_to_json_string_ext(response, JSON_C_TO_STRING_PLAIN);
-    (void)send(client->fd, text, strlen(text), MSG_NOSIGNAL);
+    (void)send_client_packet(client, text);
     json_object_put(response);
+}
+
+static void handle_status(struct daemon_state *state, struct client *client,
+                          const char *id) {
+    struct json_object *response = json_object_new_object();
+    json_object_object_add(response, "version", json_object_new_int(1));
+    json_object_object_add(response, "id", json_object_new_string(id));
+    json_object_object_add(response, "ok", json_object_new_boolean(true));
+    json_object_object_add(response, "driver", json_object_new_string(state->caps.name));
+    json_object_object_add(response, "available", json_object_new_boolean(state->driver_ready));
+    if (state->zoom_magnification >= 1.0) {
+        json_object_object_add(response, "zoom_magnification",
+                               json_object_new_double(state->zoom_magnification));
+        json_object_object_add(response, "zoom_mag_x10",
+                               json_object_new_int((int)(state->zoom_magnification * 10.0 + 0.5)));
+    }
+    const char *text = json_object_to_json_string_ext(response, JSON_C_TO_STRING_PLAIN);
+    (void)send_client_packet(client, text);
+    json_object_put(response);
+}
+
+static bool role_authorized(int client_fd, enum client_role role) {
+    if (role != ROLE_SAFETY) return true;
+    struct ucred cred;
+    socklen_t len = sizeof(cred);
+    if (getsockopt(client_fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) != 0)
+        return false;
+    return cred.uid == 0 || cred.uid == geteuid();
 }
 
 static void handle_acquire(struct daemon_state *state, struct client *client,
@@ -411,6 +466,10 @@ static void handle_acquire(struct daemon_state *state, struct client *client,
     if (parse_axis(axis_text, &axis) != 0 || role == ROLE_NONE ||
         !(state->caps.axes & MOTORS_AXIS_BIT(axis))) {
         send_response(client, id, false, "invalid acquire request");
+        return;
+    }
+    if (!role_authorized(client->fd, role)) {
+        send_response(client, id, false, "unauthorized role");
         return;
     }
     unsigned lease_ms;
@@ -597,6 +656,8 @@ static void handle_request(struct daemon_state *state, struct client *client,
         send_response(client, id, false, version == 1 ? "invalid request" : "unsupported version");
     } else if (!strcmp(operation, "capabilities")) {
         handle_capabilities(state, client, id);
+    } else if (!strcmp(operation, "status")) {
+        handle_status(state, client, id);
     } else if (!state->driver_ready) {
         send_response(client, id, false, "driver unavailable");
     } else if (!strcmp(operation, "acquire")) {
@@ -721,6 +782,23 @@ static int start_driver(struct daemon_state *state, const char *path,
     return 0;
 }
 
+static void wait_or_kill_driver(pid_t pid) {
+    int status;
+    for (int i = 0; i < 20; ++i) {
+        if (waitpid(pid, &status, WNOHANG) == pid) return;
+        struct timespec ts = {.tv_sec = 0, .tv_nsec = 10000000L};
+        nanosleep(&ts, NULL);
+    }
+    kill(pid, SIGTERM);
+    for (int i = 0; i < 20; ++i) {
+        if (waitpid(pid, &status, WNOHANG) == pid) return;
+        struct timespec ts = {.tv_sec = 0, .tv_nsec = 10000000L};
+        nanosleep(&ts, NULL);
+    }
+    kill(pid, SIGKILL);
+    (void)waitpid(pid, &status, 0);
+}
+
 static void reap_driver(struct daemon_state *state) {
     state->driver_ready = false;
     if (state->driver_fd >= 0) {
@@ -728,11 +806,7 @@ static void reap_driver(struct daemon_state *state) {
         state->driver_fd = -1;
     }
     if (state->driver_pid > 0) {
-        int status;
-        if (waitpid(state->driver_pid, &status, WNOHANG) == 0) {
-            kill(state->driver_pid, SIGTERM);
-            (void)waitpid(state->driver_pid, &status, 0);
-        }
+        wait_or_kill_driver(state->driver_pid);
         state->driver_pid = -1;
     }
 }
@@ -798,7 +872,7 @@ static void shutdown_daemon(struct daemon_state *state) {
         state->driver_fd = -1;
     }
     if (state->driver_pid > 0) {
-        (void)waitpid(state->driver_pid, NULL, 0);
+        wait_or_kill_driver(state->driver_pid);
         state->driver_pid = -1;
     }
 }

@@ -484,12 +484,29 @@ def test_xiongmai_driver_telemetry():
             expect(json.loads(parent.recv(4096)), state="sent")
             assert read_exact(8) == bytes.fromhex("c50100200000215c")
 
+            parent.send(json.dumps({"version": 1, "id": "focus-near", "op": "move",
+                                    "axis": 3, "direction": "near",
+                                    "duration_ms": 0}).encode())
+            expect(json.loads(parent.recv(4096)), state="sent")
+            assert read_exact(8) == bytes.fromhex("c50100800000815c")
+
+            parent.send(json.dumps({"version": 1, "id": "focus-far", "op": "move",
+                                    "axis": 3, "direction": "far",
+                                    "duration_ms": 0}).encode())
+            expect(json.loads(parent.recv(4096)), state="sent")
+            assert read_exact(8) == bytes.fromhex("c50101000000025c")
+
             os.write(master, b"noise X3.2 ")
             event = json.loads(parent.recv(4096))
             assert event["event"] == "telemetry", event
             assert event["name"] == "zoom_magnification", event
             assert event["value"] == 3.2, event
             assert isinstance(event.get("observed_mono_ms"), int), event
+
+            os.write(master, b"X45.0 ")
+            event45 = json.loads(parent.recv(4096))
+            assert event45["event"] == "telemetry", event45
+            assert event45["value"] == 45.0, event45
         finally:
             parent.close()
             driver.wait(timeout=1)

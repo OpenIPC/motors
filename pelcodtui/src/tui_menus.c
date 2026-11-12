@@ -347,23 +347,29 @@ static void apply_item(struct pct_ui_context *ui, const struct pct_profile *p,
     snprintf(ui->message, sizeof(ui->message), "Cancelled");
     return;
   }
-  if (i->action)
-    snprintf(cmd, sizeof(cmd), "%s", pct_get(p, i->section, "command"));
-  else {
-    if (choose_value(ui, p, i, value, sizeof(value)))
-      return;
-    if (pct_expand_setting(p, i->id, value, cmd, sizeof(cmd), err,
-                           sizeof(err))) {
-      snprintf(ui->message, sizeof(ui->message), "%s", err);
-      return;
-    }
-  }
+  if (!i->action && choose_value(ui, p, i, value, sizeof(value)))
+    return;
   if (t->use_motorsd) {
     if (pct_named_command(t, i->id, i->action ? NULL : value,
                           ui->message, sizeof(ui->message)))
       return;
-  } else if (pct_execute(t, cmd, ui->message, sizeof(ui->message)))
+    snprintf(cmd, sizeof(cmd), "motorsd:%s", i->id);
+  } else {
+    if (i->action) {
+      const char *raw_cmd = pct_get(p, i->section, "command");
+      if (!raw_cmd) {
+        snprintf(ui->message, sizeof(ui->message), "Missing command");
+        return;
+      }
+      snprintf(cmd, sizeof(cmd), "%s", raw_cmd);
+    } else if (pct_expand_setting(p, i->id, value, cmd, sizeof(cmd), err,
+                                  sizeof(err))) {
+      snprintf(ui->message, sizeof(ui->message), "%s", err);
       return;
+    }
+    if (pct_execute(t, cmd, ui->message, sizeof(ui->message)))
+      return;
+  }
   if (t->dry_run)
     return;
   mkdir("/etc/pelcodtui", 0755);

@@ -43,6 +43,7 @@ struct driver_state {
     uint64_t cancel_mcu_af_at_ms;
     uint64_t cancel_mcu_af_stop_ms;
     unsigned cancel_mcu_af_passes;
+    double last_logged_zoom_mag;
     uint8_t rx_buf[RX_BUFFER_MAX];
     size_t rx_len;
 };
@@ -263,8 +264,23 @@ static int send_movement_event(int fd, uint32_t axes) {
     return result;
 }
 
-static int send_zoom_magnification(const struct driver_state *state, double value) {
-    fprintf(stderr, "anjoy_driver: zoom_mag=%.2f\n", value);
+static int stop_all_motion(struct driver_state *state) {
+    bool needs_stop = state->active || state->cancel_mcu_af_stop_ms != 0 ||
+                      state->cancel_mcu_af_passes > 0;
+    state->active = 0;
+    state->zoom_was_active = false;
+    state->cancel_mcu_af_at_ms = 0;
+    state->cancel_mcu_af_stop_ms = 0;
+    state->cancel_mcu_af_passes = 0;
+    memset(state->deadlines, 0, sizeof(state->deadlines));
+    return needs_stop ? send_cmd_frame(state, 0x00, 0x00, 0x00, 0x00) : 0;
+}
+
+static int send_zoom_magnification(struct driver_state *state, double value) {
+    if (fabs(value - state->last_logged_zoom_mag) >= 0.05) {
+        state->last_logged_zoom_mag = value;
+        fprintf(stderr, "anjoy_driver: zoom_mag=%.2f\n", value);
+    }
     struct json_object *event = json_object_new_object();
     json_object_object_add(event, "version", json_object_new_int(1));
     json_object_object_add(event, "event", json_object_new_string("telemetry"));
@@ -339,7 +355,10 @@ static int send_move(struct driver_state *state, unsigned axis, const char *dir)
     state->cancel_mcu_af_at_ms = 0;
     state->cancel_mcu_af_stop_ms = 0;
     state->cancel_mcu_af_passes = 0;
-    state->zoom_was_active = (axis == MOTORS_AXIS_ZOOM);
+    if (axis == MOTORS_AXIS_ZOOM)
+        state->zoom_was_active = true;
+    else if (axis == MOTORS_AXIS_FOCUS)
+        state->zoom_was_active = false;
     switch ((enum motors_axis)axis) {
     case MOTORS_AXIS_PAN:
         d1 = (uint8_t)state->config.pan_speed;
@@ -378,7 +397,7 @@ static int send_anjoy_ircut(struct driver_state *state, bool night) {
     uint16_t sum = 0;
     for (int i = 0; i < 9; ++i) sum += frame[i];
     frame[9] = (uint8_t)(sum & 0xff);
-    int rc = write_all(state->uart_fd, frame, sizeof(frame));
+    if (write_all(state->uart_fd, frame, sizeof(frame)) != 0) return -1;
 
     /* 2. Anjoy proprietary IR LED control 10-byte serial packet (Cmd 0x04) */
     uint8_t led_frame[10] = {
@@ -388,27 +407,28 @@ static int send_anjoy_ircut(struct driver_state *state, bool night) {
     sum = 0;
     for (int i = 0; i < 9; ++i) sum += led_frame[i];
     led_frame[9] = (uint8_t)(sum & 0xff);
-    (void)write_all(state->uart_fd, led_frame, sizeof(led_frame));
+    if (write_all(state->uart_fd, led_frame, sizeof(led_frame)) != 0) return -1;
 
     /* 3. Pelco-D Preset 105 (Night) / 106 & 104 (Day) as sent by stock firmware */
     if (night) {
-        (void)send_cmd_frame(state, 0x00, 0x07, 0x00, 105);
+        if (send_cmd_frame(state, 0x00, 0x07, 0x00, 105) != 0) return -1;
     } else {
-        (void)send_cmd_frame(state, 0x00, 0x07, 0x00, 106);
-        (void)send_cmd_frame(state, 0x00, 0x07, 0x00, 104);
+        if (send_cmd_frame(state, 0x00, 0x07, 0x00, 106) != 0) return -1;
+        if (send_cmd_frame(state, 0x00, 0x07, 0x00, 104) != 0) return -1;
     }
 
     /* 4. Board GPIO 23 (IRCUT A / night) / 24 (IRCUT B / day) pulse */
     const char *gpio_path = night ? "/sys/class/gpio/gpio23/value" : "/sys/class/gpio/gpio24/value";
     int gpio_fd = open(gpio_path, O_WRONLY);
     if (gpio_fd >= 0) {
-        (void)write(gpio_fd, "1\n", 2);
+        int gpio_rc = write_all(gpio_fd, "1\n", 2);
         usleep(100000); /* 100ms pulse */
-        (void)write(gpio_fd, "0\n", 2);
+        if (write_all(gpio_fd, "0\n", 2) != 0) gpio_rc = -1;
         close(gpio_fd);
+        if (gpio_rc != 0) return -1;
     }
 
-    return rc;
+    return 0;
 }
 
 static int handle_raw(struct driver_state *state, struct json_object *request) {
@@ -482,11 +502,21 @@ static int handle_request(struct driver_state *state, struct json_object *reques
     if (!strcmp(operation, "command")) {
         const char *name = json_string(request, "name");
         if (!name) return send_reply(state->control_fd, id, false, "command name required");
-        if (!strcmp(name, "preset")) {
+        if (!strcmp(name, "preset") || !strcmp(name, "preset.call") ||
+            !strcmp(name, "preset.set") || !strcmp(name, "preset.clear")) {
             const char *val_str = json_string(request, "value");
-            unsigned preset = val_str ? (unsigned)atoi(val_str) : json_uint(request, "value", 0);
-            if (preset > 255) return send_reply(state->control_fd, id, false, "invalid preset");
-            if (send_cmd_frame(state, 0x00, 0x07, 0x00, (uint8_t)preset) != 0)
+            unsigned preset = 0;
+            if (val_str) {
+                if (parse_uint(val_str, 1, 255, &preset) != 0)
+                    return send_reply(state->control_fd, id, false, "invalid preset");
+            } else {
+                preset = json_uint(request, "value", 0);
+                if (preset < 1 || preset > 255)
+                    return send_reply(state->control_fd, id, false, "invalid preset");
+            }
+            uint8_t cmd2 = !strcmp(name, "preset.set") ? 0x03 :
+                           (!strcmp(name, "preset.clear") ? 0x05 : 0x07);
+            if (send_cmd_frame(state, 0x00, cmd2, 0x00, (uint8_t)preset) != 0)
                 return send_reply(state->control_fd, id, false, "preset write failed");
             return send_reply(state->control_fd, id, true, "preset sent");
         }
@@ -495,6 +525,10 @@ static int handle_request(struct driver_state *state, struct json_object *reques
             bool night = false;
             if (val && (!strcmp(val, "night") || !strcmp(val, "on") || !strcmp(val, "1")))
                 night = true;
+            else if (val && (!strcmp(val, "day") || !strcmp(val, "off") || !strcmp(val, "0")))
+                night = false;
+            else
+                return send_reply(state->control_fd, id, false, "invalid ircut value");
             if (send_anjoy_ircut(state, night) != 0)
                 return send_reply(state->control_fd, id, false, "ircut write failed");
             return send_reply(state->control_fd, id, true, "ircut sent");
@@ -503,7 +537,7 @@ static int handle_request(struct driver_state *state, struct json_object *reques
     }
 
     if (!strcmp(operation, "shutdown")) {
-        int result = state->active ? send_stop(state) : 0;
+        int result = stop_all_motion(state);
         (void)send_reply(state->control_fd, id, result == 0,
                          result == 0 ? "stopped" : "stop failed");
         return 1;
@@ -562,11 +596,12 @@ static int parse_telemetry(struct driver_state *state) {
         } else if (subtype == 0x79) {
             if (payload_len == 3 && state->rx_buf[6] == 0x01 &&
                 state->rx_buf[7] == 0x04 && state->rx_buf[8] == 0x00) {
-                /* MCU reported ZOOM OVER (01 04 00): cancel MCU internal AF hunting */
-                if (!state->active &&
-                    (state->zoom_was_active || state->cancel_mcu_af_passes > 0)) {
+                /* MCU reported ZOOM OVER (01 04 00): cancel MCU internal AF hunting
+                 * only if no cancel pass is currently driving the focus motor.
+                 */
+                if (!state->active && state->cancel_mcu_af_stop_ms == 0 &&
+                    (state->zoom_was_active || state->cancel_mcu_af_passes == 2)) {
                     state->zoom_was_active = false;
-                    state->cancel_mcu_af_stop_ms = 0;
                     state->cancel_mcu_af_passes = 2;
                     state->cancel_mcu_af_at_ms = now_ms() + 120;
                 }
@@ -713,8 +748,8 @@ int main(int argc, char **argv) {
         return 2;
     }
 
-    /* Send safe stop frame and schedule boot-time MCU internal AF cancel */
-    state.zoom_was_active = true;
+    /* Send safe stop frame on startup without scheduling focus movement */
+    state.zoom_was_active = false;
     if (send_stop(&state) != 0) {
         fprintf(stderr, "safe startup failed: %s\n", strerror(errno));
         close(state.uart_fd);
@@ -747,7 +782,7 @@ int main(int argc, char **argv) {
         char message[MESSAGE_MAX + 1];
         ssize_t length = recv(control_fd, message, MESSAGE_MAX, 0);
         if (length <= 0) {
-            if (state.active && send_stop(&state) != 0) exit_code = 1;
+            if (stop_all_motion(&state) != 0) exit_code = 1;
             break;
         }
         message[length] = '\0';
