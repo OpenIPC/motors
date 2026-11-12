@@ -23,9 +23,11 @@ moved the head, and the adapter decoded clean frames.
 | `-i` | TXD pad only, inverted, GPIO9_2 high during the burst | for an A/B pair wired the other way round |
 
 Both modes set the bus-mark levels **before** the pads leave the UART, so the
-line never drops into a break at the start. Afterwards they restore the pads
-(`0x200f007c`, `0x200f0084`), the GPIO9 direction register and GPIO9_2, so
-UART1 works again.
+line never drops into a break at the start. On exit they restore exactly what
+they found: the pads (`0x200f007c`, `0x200f0084`), the GPIO9 direction
+register and GPIO9_2's level. So UART1 works again, and a board profile that
+holds GPIO9_2 high keeps it high. SIGINT, SIGTERM and SIGHUP end the burst at
+the next byte and take the same path. The tool then exits 130.
 
 ## Timing
 
@@ -34,8 +36,9 @@ memory locked. Kernel interrupts (ISP/VIU, VPSS, the encoder and the tick)
 still delay an edge now and then. Without a guard, about 20 % of frames came
 out damaged, with or without majestic running. So each edge's lateness is
 measured after the write. A frame with an edge later than 20 % of a bit is
-sent again, up to 5 times, and the head drops the damaged copy on its
-checksum. The tool reports `N frame(s) resent, M not delivered` on stderr and
+sent again, up to 5 times, after a fresh idle gap counted from the real time
+of its last edge, so the head can resync. The head drops the damaged copy on
+its checksum. The tool reports `N frame(s) resent, M not delivered` on stderr and
 exits 1 if any frame never got a clean copy out. Expect one or two of those
 in a few hundred frames.
 
@@ -50,9 +53,10 @@ pelco-bb -r 250 ff 01 00 02 20 00 23    # pan right
 pelco-bb -i -r 250 ff 01 00 04 3f 00 44 # same, single inverted pad + GPIO9_2
 ```
 
-A Pelco-D frame is `FF addr cmd1 cmd2 data1 data2 sum`, with `sum` = bytes 2–6
-mod 256. Don't run it while majestic is sending on `ttyAMA1`, because both use
-the same pads.
+Each byte is one hex argument, 00–ff; anything else is rejected before the
+hardware is touched. `-b` takes 50–115200 baud. A Pelco-D frame is
+`FF addr cmd1 cmd2 data1 data2 sum`, with `sum` = bytes 2–6 mod 256. Don't run
+it while majestic is sending on `ttyAMA1`, because both use the same pads.
 
 ## Checking the bus with a USB-RS485 adapter
 
