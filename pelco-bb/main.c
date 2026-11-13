@@ -3,8 +3,9 @@
  * Xiongmai HI3516D_N81820 (HiSilicon Hi3516A/D V100) by bit-banging the UART1
  * pads, for debugging an RS-485 PTZ head when the UART path does not reach it.
  *
- * On the lab N81820 the bus pair sees UART1 TXD/RXD single-ended from CN2 pins
- * 3/4. A lone TXD swing never pulls A below B, so frames written to
+ * The N81820's CN2 pins 3/4 are UART1 RXD/TXD at 3.3 V TTL, with no
+ * transceiver (proven with a TTL USB-UART on plain /dev/ttyAMA1). On a bare
+ * RS-485 pair a lone TXD swing never pulls A below B, so frames written to
  * /dev/ttyAMA1 never show up on the bus, whatever GPIO9_2 ("DE" in the stock
  * libdvr) does. The default mode turns both pads into GPIOs and drives them as
  * a complementary pair -- TXD pad (GPIO9_5, bus A) = data, RXD pad (GPIO9_3,

@@ -8,14 +8,24 @@ written to `/dev/ttyAMA1` (majestic's `ptz.head: pelco-d`) do nothing.
 
 ## Why it exists
 
-On the lab N81820, with the head and a USB-RS485 adapter on the same pair, the
-UART path never reached the bus. `/dev/ttyAMA1` at 9600, with GPIO9_2 (the
-stock libdvr's "DE") high or low, gave 0 bytes at the adapter. So did UART2,
-UART3 and a forced break. The bus pair sees UART1 TXD and RXD single-ended from
-CN2 pins 3/4, and a lone TXD swing never pulls A below B.
+The N81820's PTZ port is **not RS-485**. CN2 pins 3/4 are the SoC's UART1 RXD
+and TXD at **3.3 V TTL**, with no transceiver. The module manual says as much
+("TTL串口 … (原来的485接口)", formerly a 485 port), and a direct test proved it:
+a TTL-level USB-UART on those pads talked both ways over plain `/dev/ttyAMA1`
+at 9600 8N1, byte-exact, with no DE, GPIO or pinmux change. So stock Sofia and
+majestic, which both just `write()` to `ttyAMA1`, work with a TTL PTZ base out
+of the box.
 
-Driving both pads as a complementary pair does work. The default mode below
-moved the head, and the adapter decoded clean frames.
+On a bare RS-485 pair they do not. On the lab bench the head, a USB-RS485
+adapter and CN2 shared one pair, and `/dev/ttyAMA1` gave 0 bytes at the
+adapter, with GPIO9_2 (the stock libdvr's "DE") high or low. So did UART2,
+UART3 and a forced break. A single 0–3.3 V line never pulls A below B.
+
+Driving both pads as a complementary pair does work. The two TTL pins become a
+pseudo-differential signal. The default mode below moved the head, and the
+adapter decoded clean frames. The proper fix is a 3.3 V TTL↔RS-485 transceiver
+between CN2 and the bus; this tool is the software stand-in, and a debugging
+instrument either way.
 
 | Mode | Pads | Bus |
 |---|---|---|
@@ -28,6 +38,37 @@ they found: the pads (`0x200f007c`, `0x200f0084`), the GPIO9 direction
 register and GPIO9_2's level. So UART1 works again, and a board profile that
 holds GPIO9_2 high keeps it high. SIGINT, SIGTERM and SIGHUP end the burst at
 the next byte and take the same path. The tool then exits 130.
+
+## Electrical limits: a bench instrument, not a connection
+
+The paired drive puts two bare 3.3 V SoC pins on an RS-485 pair. That is out of
+spec in three ways, so use it for short one-way tests only:
+
+1. **Drive current.** The pins have to drive the bus's 120 Ω termination:
+   ±3.3 V across one terminator is about 27 mA, and about 55 mA with both ends
+   terminated. A HiSilicon GPIO is rated for a few mA (4–12 mA depending on
+   drive strength). The signal survives because the pins sag, but that is
+   stress on the SoC.
+2. **Over-voltage.** While anything else drives the pair (a 5 V USB-RS485
+   adapter, or a head that answers), these pins see the full RS-485 swing,
+   which may be up to −7…+12 V. The pads are not 5 V tolerant, so the excess
+   flows through their protection diodes. Keep the camera the only transmitter:
+   an adapter used as a witness must only listen.
+3. **No common ground.** CN2's ground is not tied to the bus, so the camera's
+   reference settles through those same diodes. RS-485 tolerates a floating
+   ground; bare SoC pins do not.
+
+If you keep it wired this way for longer:
+
+- put a 100–220 Ω series resistor in each CN2 line. With 100 Ω each and one
+  120 Ω terminator the bus still sees about 1.2 V differential, against the
+  0.2 V receivers need, and the current drops to about 10 mA;
+- run a ground wire from CN2 pin 2 to the bus or adapter ground;
+- never let another node transmit while the camera is attached.
+
+The real fix is a 3.3 V TTL↔RS-485 transceiver (MAX3485 / SP3485 class,
+auto-direction) between CN2 and the bus. With one, plain majestic or Sofia on
+`/dev/ttyAMA1` drives the head and this tool is not needed.
 
 ## Timing
 
@@ -96,6 +137,6 @@ The tool is hard-wired to the HI3516D_N81820 / Hi3516A V100 map:
 |---|---|
 | IOCONFIG | `0x200f0000`; UART1_RXD pad `0x07c` (1 = UART, 0 = GPIO9_3), UART1_TXD pad `0x084` (1 = UART, 0 = GPIO9_5) |
 | GPIO9 (PL061) | `0x201d0000`; data is masked by address bits, so `base + (mask << 2)` writes only the bits in `mask`; direction at `+0x400` |
-| GPIO9_2 | the RS-485 DE line in stock `libdvr` (`PtzWrite`); the OpenIPC builder profile holds it high |
+| GPIO9_2 | written as an RS-485 DE by stock `libdvr` (`PtzWrite`), but nothing on this board uses it; the OpenIPC builder profile holds it high |
 
 For another board, change these constants.
