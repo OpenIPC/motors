@@ -16,10 +16,13 @@ int main(int argc, char **argv) {
     const char *action = NULL;
     const char *arg_val = NULL;
     unsigned duration_ms = 0;
+    unsigned speed = 0;
 
     for (int i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--socket") && i + 1 < argc) {
             socket_path = argv[++i];
+        } else if (!strcmp(argv[i], "--speed") && i + 1 < argc) {
+            speed = (unsigned)atoi(argv[++i]);
         } else if (!action) {
             action = argv[i];
         } else if (!arg_val) {
@@ -86,7 +89,9 @@ int main(int argc, char **argv) {
             rc = motors_acquire(client, MOTORS_MANUAL, axis, lease_ms, error, sizeof(error));
         }
         if (rc == 0) {
-            rc = motors_move(client, axis, dir, duration_ms, error, sizeof(error));
+            rc = speed > 0
+                ? motors_move_speed(client, axis, dir, speed, duration_ms, error, sizeof(error))
+                : motors_move(client, axis, dir, duration_ms, error, sizeof(error));
             if (rc == 0 && duration_ms > 0) {
                 rc = motors_wait_movement(client, axis, (int)duration_ms + 1000, NULL, error, sizeof(error));
             }
