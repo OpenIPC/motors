@@ -39,6 +39,37 @@ register and GPIO9_2's level. So UART1 works again, and a board profile that
 holds GPIO9_2 high keeps it high. SIGINT, SIGTERM and SIGHUP end the burst at
 the next byte and take the same path. The tool then exits 130.
 
+## Electrical limits: a bench instrument, not a connection
+
+The paired drive puts two bare 3.3 V SoC pins on an RS-485 pair. That is out of
+spec in three ways, so use it for short one-way tests only:
+
+1. **Drive current.** The pins have to drive the bus's 120 Ω termination:
+   ±3.3 V across one terminator is about 27 mA, and about 55 mA with both ends
+   terminated. A HiSilicon GPIO is rated for a few mA (4–12 mA depending on
+   drive strength). The signal survives because the pins sag, but that is
+   stress on the SoC.
+2. **Over-voltage.** While anything else drives the pair (a 5 V USB-RS485
+   adapter, or a head that answers), these pins see the full RS-485 swing,
+   which may be up to −7…+12 V. The pads are not 5 V tolerant, so the excess
+   flows through their protection diodes. Keep the camera the only transmitter:
+   an adapter used as a witness must only listen.
+3. **No common ground.** CN2's ground is not tied to the bus, so the camera's
+   reference settles through those same diodes. RS-485 tolerates a floating
+   ground; bare SoC pins do not.
+
+If you keep it wired this way for longer:
+
+- put a 100–220 Ω series resistor in each CN2 line. With 100 Ω each and one
+  120 Ω terminator the bus still sees about 1.2 V differential, against the
+  0.2 V receivers need, and the current drops to about 10 mA;
+- run a ground wire from CN2 pin 2 to the bus or adapter ground;
+- never let another node transmit while the camera is attached.
+
+The real fix is a 3.3 V TTL↔RS-485 transceiver (MAX3485 / SP3485 class,
+auto-direction) between CN2 and the bus. With one, plain majestic or Sofia on
+`/dev/ttyAMA1` drives the head and this tool is not needed.
+
 ## Timing
 
 The bits are timed by a busy-wait on `CLOCK_MONOTONIC` under `SCHED_FIFO` with
