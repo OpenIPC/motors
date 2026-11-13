@@ -4,34 +4,51 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repository is
 
-A collection of independent C tools that drive or configure camera motors
-(pan/tilt, zoom, focus, iris) on IP-camera SoCs - Xiongmai, HiSilicon, and
-Ingenic T31. There is no shared library and no top-level build. Each directory
-is self-contained, and `api/` is a design document for a future daemon that
-would unify them. Most tools are single-file hardware utilities; `pelcodtui/`
-is a multi-file ncurses application with host-runnable tests.
+A collection of C tools that drive or configure camera motors (pan/tilt, zoom,
+focus, iris) on IP-camera SoCs - Xiongmai, HiSilicon, SigmaStar, Goke, and
+Ingenic T31. There is no top-level build. Most directories are self-contained
+single-file hardware utilities. Two are not:
 
-Most tools require real motor hardware and have no tests. `pelcodtui` tests its
-protocol, profiles, state storage, and UART output on a pseudo terminal. The
-automated check is `.github/workflows/gcc-compat.yml`, a **required status
-check** (`GCC Gate`) on `master`. Know precisely what it does and does not cover:
+- `motorsd/` is a motor service: a daemon, its hardware drivers, the
+  `libmotors` client library, and the `motorsctl`/`motors-cli` clients. See
+  the `motorsd/` section below.
+- `pelcodtui/` is a multi-file ncurses application. It compiles
+  `../motorsd/src/libmotors.c` and links `json-c`, so it is no longer
+  self-contained.
 
-- It cross-compiles seven tools on GCC 12 and GCC 14, then builds and tests
-  `pelcodtui` natively. **`an41908a` is excluded**, because it needs the
-  proprietary Hi3516CV500 MPP SDK. Changes under `an41908a/` get no CI
-  coverage and must be built by hand. A green gate says nothing about them.
+Most tools require real motor hardware and have no tests. `motorsd` tests its
+leases, preemption, events, telemetry, raw access, and driver recovery against
+a mock driver, and its Anjoy and Pelco drivers on pseudo terminals. `pelcodtui`
+tests its protocol, profiles, state storage, and UART output on a pseudo
+terminal. The automated check is `.github/workflows/gcc-compat.yml`, a
+**required status check** (`GCC Gate`) on `master`. Branch protection also
+requires a PR to be up to date with `master` before it merges. Know precisely
+what the gate does and does not cover:
+
+- It cross-compiles ten tools on GCC 12 and GCC 14, then runs
+  `make -C motorsd test` and `make -C pelcodtui test` natively. A new tool is
+  covered only once it is added to that workflow by name. **`an41908a` is
+  excluded**, because it needs the proprietary Hi3516CV500 MPP SDK. Changes
+  under `an41908a/` get no CI coverage and must be built by hand. A green
+  gate says nothing about them.
 - It is a *compiler* gate, not a *toolchain* gate. It uses Debian's glibc cross-compilers (`arm-linux-gnueabihf`, `mipsel-linux-gnu`), not the musl OpenIPC or vendor toolchains these tools actually ship against. That is deliberate: the defects it exists to catch — implicit declarations, format bugs, int conversions — are language-level and libc-independent, whereas the real toolchains are 100 MB–3.7 GB downloads and the vendor ones are GCC 4.4–6.3, too old to catch what a modern compiler rejects. The gap it leaves is a musl-only build break (a header difference between musl and glibc) passing CI and failing on the real toolchain.
-- It proves the tree still compiles and runs `pelcodtui` host tests. It does not
-  produce a deployable binary, and it says nothing about whether a motor moves.
+- It proves the tree still compiles and runs the `motorsd` and `pelcodtui` host
+  tests. It does not produce a deployable binary, and it says nothing about
+  whether a motor moves.
 
-Because every tool talks to different vendor hardware, **the tools cannot be built or run on the development host** — they are cross-compiled for ARM and executed on a camera over SSH.
+Because every tool talks to different vendor hardware, **the hardware tools cannot be run on the development host** — they are cross-compiled for ARM (or MIPS) and executed on a camera over SSH. `motorsd` and `pelcodtui` are the exceptions: both build and test natively.
 
 ## Building
 
-There is no top-level Makefile. Build each tool in its directory. The legacy
-hardware tools are cross-compiled; `pelcodtui` also builds and tests natively.
+There is no top-level Makefile. Build each tool in its directory. The hardware
+tools are cross-compiled; `motorsd` and `pelcodtui` also build and test
+natively. Both need `make`, `pkg-config` and the `json-c` development files;
+`motorsd`'s tests also need `python3`. Both use `-Wall -Wextra -Werror`, so a new
+warning breaks the build and the gate.
 
 ```sh
+cd motorsd && make test     # daemon, drivers, libmotors, clients + architecture tests
+cd motorsd && make camera   # cross-compile with arm-openipc-linux-musleabi-gcc into build-camera/
 cd pelcodtui && make test
 ```
 
@@ -149,6 +166,57 @@ replies (zoom reports `"X1.6 "`). An idle capture has no PTZ→camera bytes;
 that is normal, not a dead link. Keep `codec.key()` consistent with what
 `diff` should treat as meaningful.
 
-## `api/` — design only, nothing implemented
+## `motorsd/` — the shared motor service
 
-`api/README.md` proposes a `motors-daemon` that loads per-hardware "driver wrapper" `.so` plugins and exposes a unified PTZ/AF/IRCut API over a UNIX socket. None of it exists yet, and the open questions it raises (one wrapper at a time vs. several; whether protocol logic belongs in the kernel module or the wrapper) are unresolved. Read it before designing anything cross-cutting, but do not treat it as describing current code.
+`motorsd` gives every motor client one service and one ownership model. Read
+`motorsd/README.md`, then the two protocol specs, before changing it:
+`PROTOCOL.md` is the public socket API clients use, and `DRIVER_PROTOCOL.md` is
+the private protocol between the daemon and its driver.
+
+- **One driver process owns the hardware.** `motorsd` forks and execs exactly
+  one driver (`--driver`, `--driver-config`) and talks to it over a socketpair
+  passed as `--fd`. Only the driver opens the UART. `motorsd` never interprets
+  hardware values; the driver validates its own config and every command. The
+  drivers are `drivers/pelcod_driver.c` (Pelco-D and the XM Pelco variant, with
+  `X<ratio>` zoom telemetry), `drivers/anjoy_driver.c` (Anjoy MC800S
+  pan/tilt/zoom/focus/iris and IR-cut) and `drivers/mock_driver.c` (tests
+  only). Example configs are in `motorsd/config/`.
+- **Leases are per connection and per axis.** A client `acquire`s an axis with a
+  role (`automation` < `af` < `manual` < `safety`) and a lease time. A
+  higher-role acquire preempts and revokes a lower one; equal or lower gets
+  `busy`. The role is stored per axis, not per client. `safety` is only granted
+  to a peer running as root or as the daemon's own user (`SO_PEERCRED`).
+  Closing the connection ends the lease and stops its movement.
+- **Driver failure revokes leases.** If the driver dies or misses its reply
+  timeout, the daemon revokes the affected leases and restarts it, then keeps
+  retrying every second. Status still works while it is down; movement is
+  rejected. Clients must re-acquire after recovery.
+- **The daemon is single-threaded.** A driver request blocks every client until
+  the driver replies or its 15 s timeout expires, so drivers should answer
+  promptly and not run long sequences inside one request.
+- **All its sockets are `SOCK_CLOEXEC`.** Only the driver's end of the
+  socketpair is deliberately made inheritable after fork. Keep it that way when
+  adding fds, or every driver restart inherits client sockets.
+
+Clients:
+
+- `libmotors` (`include/libmotors.h`, `build/libmotors.a`) is the C API.
+- `motorsctl` sends raw JSON requests.
+- `motors-cli` is the shorthand for scripts: `[--speed N] [--role R] <action> [arg]`.
+  The named commands it sends must exist in the selected driver. For example,
+  `ircut` is implemented only by the Anjoy driver.
+
+`pelcodtui` now connects to `motorsd` by default (`--socket`). It builds its
+menus from the driver's `describe` reply, so the driver's control `name` is the
+wire name. `--direct` is the legacy path that opens the UART itself; never run
+it while `motorsd` owns the same port.
+
+## `api/` — the original design, partly superseded
+
+`api/README.md` is the early proposal for a `motors-daemon` that loads
+per-hardware "driver wrapper" `.so` plugins and exposes a unified PTZ/AF/IRCut
+API over a UNIX socket. `motorsd/` implements the daemon-plus-socket part of
+that idea, but differently: drivers are separate processes over a socketpair,
+not `.so` plugins, and exactly one driver runs at a time. Treat `api/README.md`
+as background for the open questions it raises, not as a description of the
+code. `motorsd/` and its protocol documents are the current reference.
