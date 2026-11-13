@@ -6,9 +6,16 @@
 
 static void usage(const char *name) {
     fprintf(stderr,
-        "Usage: %s [--socket PATH] <action> [arg]\n"
+        "Usage: %s [--socket PATH] [--speed N] [--role automation|af|manual] <action> [arg]\n"
         "Actions: up, down, left, right, tele, wide, near, far, open, close, stop, preset <num>, ircut <day|night>\n",
         name);
+}
+
+static int parse_role(const char *s, enum motors_client_role *out) {
+    if (!strcmp(s, "automation")) { *out = MOTORS_AUTOMATION; return 0; }
+    if (!strcmp(s, "af")) { *out = MOTORS_AF; return 0; }
+    if (!strcmp(s, "manual")) { *out = MOTORS_MANUAL; return 0; }
+    return -1;
 }
 
 int main(int argc, char **argv) {
@@ -17,12 +24,18 @@ int main(int argc, char **argv) {
     const char *arg_val = NULL;
     unsigned duration_ms = 0;
     unsigned speed = 0;
+    enum motors_client_role role = MOTORS_MANUAL;
 
     for (int i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--socket") && i + 1 < argc) {
             socket_path = argv[++i];
         } else if (!strcmp(argv[i], "--speed") && i + 1 < argc) {
             speed = (unsigned)atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "--role") && i + 1 < argc) {
+            if (parse_role(argv[++i], &role) != 0) {
+                fprintf(stderr, "unknown role: %s\n", argv[i]);
+                return 2;
+            }
         } else if (!action) {
             action = argv[i];
         } else if (!arg_val) {
@@ -86,7 +99,7 @@ int main(int argc, char **argv) {
         unsigned lease_ms = duration_ms + 1000;
         rc = motors_subscribe(client, error, sizeof(error));
         if (rc == 0) {
-            rc = motors_acquire(client, MOTORS_MANUAL, axis, lease_ms, error, sizeof(error));
+            rc = motors_acquire(client, role, axis, lease_ms, error, sizeof(error));
         }
         if (rc == 0) {
             rc = speed > 0
