@@ -19,14 +19,17 @@ struct pct_profile {
 
 struct pct_transport {
     char device[128];
+    char socket_path[108];
     unsigned baud, address, sequence_delay_ms;
     unsigned stop_repeat, stop_delay_ms;
-    bool dry_run;
+    bool dry_run, use_motorsd;
 };
 
 struct pct_motion {
     const struct pct_transport *transport;
     int fd;
+    void *service_client;
+    unsigned service_axis;
     bool active;
 };
 
@@ -48,6 +51,8 @@ struct pct_command {
 };
 
 int pct_profile_load(struct pct_profile *p, const char *path, char *err, size_t n);
+int pct_profile_from_description(struct pct_profile *p, const char *json,
+                                 char *err, size_t n);
 int pct_profile_validate(const struct pct_profile *p, char *err, size_t n);
 const char *pct_get(const struct pct_profile *p, const char *section, const char *key);
 bool pct_csv_has(const char *csv, const char *value);
@@ -61,6 +66,10 @@ void pct_frame_stop(uint8_t addr, uint8_t out[7]);
 void pct_frame_motion(uint8_t addr, const char *verb, unsigned speed, uint8_t out[7]);
 int pct_execute(const struct pct_transport *t, const char *sequence,
                 char *summary, size_t n);
+int pct_named_command(const struct pct_transport *t, const char *name,
+                      const char *value, char *summary, size_t n);
+int pct_preset(const struct pct_transport *t, const char *operation,
+               unsigned preset, char *summary, size_t n);
 int pct_move(const struct pct_transport *t, const char *verb, unsigned speed,
              unsigned duration_ms, char *summary, size_t n);
 int pct_motion_start(struct pct_motion *motion, const struct pct_transport *t,

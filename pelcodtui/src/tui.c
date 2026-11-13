@@ -113,9 +113,14 @@ int pct_ui_run(struct pct_ui_context *ui, struct pct_profile *p,
     attron(COLOR_PAIR(1) | A_BOLD);
     mvprintw(0, 2, "pelcodtui");
     attroff(COLOR_PAIR(1) | A_BOLD);
-    printw("  %s  %s @ %u addr %u%s",
-           pct_ui_nz(pct_get(p, "profile", "name"), "Unnamed profile"),
-           t->device, t->baud, t->address, t->dry_run ? "  DRY RUN" : "");
+    if (t->use_motorsd)
+      printw("  %s  motorsd%s",
+             pct_ui_nz(pct_get(p, "profile", "name"), "Unnamed profile"),
+             t->dry_run ? "  DRY RUN" : "");
+    else
+      printw("  %s  %s @ %u addr %u%s",
+             pct_ui_nz(pct_get(p, "profile", "name"), "Unnamed profile"),
+             t->device, t->baud, t->address, t->dry_run ? "  DRY RUN" : "");
     mvprintw(
         1, 2,
         "Camera state is not readable; values below are last commands sent.");

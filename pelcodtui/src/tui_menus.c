@@ -347,19 +347,30 @@ static void apply_item(struct pct_ui_context *ui, const struct pct_profile *p,
     snprintf(ui->message, sizeof(ui->message), "Cancelled");
     return;
   }
-  if (i->action)
-    snprintf(cmd, sizeof(cmd), "%s", pct_get(p, i->section, "command"));
-  else {
-    if (choose_value(ui, p, i, value, sizeof(value)))
+  if (!i->action && choose_value(ui, p, i, value, sizeof(value)))
+    return;
+  if (t->use_motorsd) {
+    const char *wire_name = pct_ui_nz(pct_get(p, i->section, "name"), i->id);
+    if (pct_named_command(t, wire_name, i->action ? NULL : value,
+                          ui->message, sizeof(ui->message)))
       return;
-    if (pct_expand_setting(p, i->id, value, cmd, sizeof(cmd), err,
-                           sizeof(err))) {
+    snprintf(cmd, sizeof(cmd), "motorsd:%s", wire_name);
+  } else {
+    if (i->action) {
+      const char *raw_cmd = pct_get(p, i->section, "command");
+      if (!raw_cmd) {
+        snprintf(ui->message, sizeof(ui->message), "Missing command");
+        return;
+      }
+      snprintf(cmd, sizeof(cmd), "%s", raw_cmd);
+    } else if (pct_expand_setting(p, i->id, value, cmd, sizeof(cmd), err,
+                                  sizeof(err))) {
       snprintf(ui->message, sizeof(ui->message), "%s", err);
       return;
     }
+    if (pct_execute(t, cmd, ui->message, sizeof(ui->message)))
+      return;
   }
-  if (pct_execute(t, cmd, ui->message, sizeof(ui->message)))
-    return;
   if (t->dry_run)
     return;
   mkdir("/etc/pelcodtui", 0755);
@@ -578,7 +589,6 @@ int pct_ui_preset_menu(struct pct_ui_context *ui,
         snprintf(ui->message, sizeof(ui->message), "Preset must be 1..255");
         continue;
       }
-      char cmd[64];
       const char *dangerous = p ? pct_get(p, "profile",
           !strcmp(action, "Set") ? "dangerous_set" : "dangerous_call") : NULL;
       char preset_text[4];
@@ -586,9 +596,8 @@ int pct_ui_preset_menu(struct pct_ui_context *ui,
       if (pct_csv_has(dangerous, preset_text) &&
           !confirm_dialog(ui, "This preset command can reset or delete controller state."))
         continue;
-      snprintf(cmd, sizeof(cmd), "preset_%s %d",
-               !strcmp(action, "Set") ? "set" : "call", preset);
-      pct_execute(t, cmd, ui->message, sizeof(ui->message));
+      pct_preset(t, !strcmp(action, "Set") ? "set" : "call",
+                 (unsigned)preset, ui->message, sizeof(ui->message));
     }
   }
 }
