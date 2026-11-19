@@ -22,6 +22,8 @@ Test rig: XM **HI3516EV300_85H50AI** camera, stock firmware V5.00.R02.000529B2, 
 
 ## Traffic at a glance
 
+On the 85H50AI rig (the newer `libXmAf_Comm` revision differs; see *Newer revision*):
+
 ```
 camera ──► board   A5 xx xx xx xx xx xx xx   8 B, every 50 ms, always: clock, day/night, gain, focus statistic
 camera ──► board   C5 01 c1 c2 d1 d2 ck 5C   8 B, once per user action, replaces one A5 slot
@@ -185,6 +187,7 @@ EF 01 type len payload[len]
 | `02` | `01` | `00` / `01` | **IR-cut filter** (`afc_dnc`, day/night control): the camera moves its IR-cut filter one way or the other (from the code; not seen) |
 | `04`, `05`, `06` | | two bytes | **pan, tilt, zoom position** (`ack pan`, `ack title` [sic], `ack zoom`): the camera stores them as Pelco-D position responses (`FF 01 00 59` / `5B` / `54` + the two bytes), answers to a position query (from the code; not seen) |
 | `08`, `09` | | version bytes | the board's AF-controller and PTZ firmware versions (`AFC_SUP_VERSION`, `AFC_PTZ_VERSION`) (from the code; not seen) |
+| `0A` | `05` (`09` for OEM `AF_General`) | version bytes | `AFC_MCU_VERSION`, the answer to the `EF 02 0A 0C …` query; only the newer `libXmAf_Comm` handles it (from the code; not seen) |
 
 What the camera does with each type is from the stock firmware's receiver, `AFCommProc()` in `libXmAuto.so` (see *The camera's A5 stream*). For type `00` it draws the text (payload from byte 4) on the OSD at payload bytes 2–3 ×2, so `04 03 2F 2E` is "OSD text, at (94, 92)".
 
@@ -216,9 +219,53 @@ b7 = ((k - b6) & 0xFF) ^ FV[7:0]   ^ 0x65
 - **Night** sets bit 7 of byte 1, from `XmVideo_PublicApi_getDayNight()`. No capture was taken at night, so this comes from the code alone.
 - **`AG`** explains the old observations of byte 2. "`9E` for hours, then `92`" was the gain going from 1× to 2×. The churn in the first minute after boot is auto-exposure converging: the gain swings between 1× and 2–4× from 24.7 s on in `e13`. Evening captures run at 4–6×.
 - **`FV`** is the autofocus statistic. `XM_AF_ValueGet()` takes the ISP's focus statistics (`HI_MPI_ISP_GetFocusStatistics`, 17×15 zones), weights each zone by an AF window table, and blends the horizontal and vertical measures. Its low bytes change in every frame, which is why byte 7 looked random. It is 0, or a fixed 7724938, before the ISP runs at boot. In `a5-burst-record` it jumped as the zoom began (161k → 187–194k).
-- **The same library builds the board's other inputs.** `xmaf_write_encrypt()` turns the firmware's Pelco-D frames (`FF addr c1 c2 d1 d2 ck`) into the `C5 … 5C` frames (despite its name, no encryption). `xmaf_send_human_rect()` sends the largest person-detection box, scaled to 0–255, as `C5 02 C5 x y w h 5C`; it isn't seen in the captures. And `AFCommProc()` handles the board's replies (*Replies*).
+- **The same library builds the board's other inputs.** `xmaf_write_encrypt()` turns the firmware's Pelco-D frames (`FF addr c1 c2 d1 d2 ck`) into the `C5 … 5C` frames (despite its name, no encryption). `xmaf_send_human_rect()` sends the largest person-detection box, scaled to 0–255, as `C5 01 C5 x y w h 5C` (the template in `.rodata` is `c5 01 c5 00 00 00 00 5c`); it isn't seen in the captures. And `AFCommProc()` handles the board's replies (*Replies*).
 
 **The 85H50AI board doesn't use the stream for focus (verified).** The lens never refocuses while the stream runs. A stock zoom replayed with and without its `A5` frames ends equally sharp (*Second board*). Stock zooms with the stream live settle almost as far from the crest as host zooms without it (*Zoom tracking inside the board*). Other XM lens boards may be different: the protocol carries a focus statistic, so a board that ran contrast autofocus on it is at least possible. A replacement firmware that wants to look like the stock one can send the same frames with `a5_frame()`. The old xm-uart sent one of them (`a5 7b 9e f0 ef ee e0 f4`: second 94, gain 1.07×) as an "init"; the board ignores it, so it has been removed.
+
+## Newer revision: `libXmAf_Comm.so` (GK7205V300 `G6S`, 2025)
+
+Everything above was measured on the 85H50AI. XM's newer firmware puts the same link in a library of its own, `/lib/libXmAf_Comm.so` (LibXmAf commit `ee983c8d`, 2025-03-07). The example here is the `IPC_GK7205V300_G6S` 20× zoom block, sold as "IVG-G5S-20X", firmware build 2025-09-02. The camera end is again UART0 at 115200, shared with the console. This section is **from the code** (decompiled), and nothing on the wire has been captured from this camera yet.
+
+**One library, four frame sets.** The key `AFOEM` in `/mnt/custom/FirmwareInfo` picks a row of the template table `g_astXmAfProtoclos` (44 bytes per row). An unknown name falls back to `General`.
+
+| AFOEM | index | AF stream | person box | sleep | MCU version query |
+|---|---|---|---|---|---|
+| `General` (the G6S) | 0 | `A5 …`, 9 B, **plain** | `C5 01 B5 x y w h 5C` | `C5 01 B6 mode 00 ck 5C` | `EF 02 0A 0C 00 00 00 00` |
+| `Bestecher` | 1 | as General | as General | as General | as General |
+| `SSAF` | 2 | 9 B, **obfuscated** | `FF 01 91 11 cx cy w h ck`, in % (9 B) | as General | as General |
+| `AF_General` | 3 | 8 B, **obfuscated** | `C5 01 C2 cx cy w h 5C`, in % | as General | `C5 01 00 8D 00 00 8E 5C` |
+
+The person box is the largest detection, in the detector's 8192×8192 space. `General` and `Bestecher` send it as the 85H50AI does: centre x and y as signed −127..127 (y up), width and height as 0–255. The other two OEMs send percentages of the frame.
+
+**The AF stream.**
+- Layout: `A5 K AG[15:8] AG[7:0] FV[31:24] FV[23:16] FV[15:8] FV[7:0] [flags]`.
+- Byte 1 (`K`) is built as on the 85H50AI: `~(sec ^ 0x5A)`, the same as `(sec ^ 0x25) & 0x7F`, with bit 7 for night. `AG` is `LibXmVideo_Video_getAllGain()`; how it scales hasn't been checked against `u32AGain`.
+- **Obfuscation:** the chain applies only to `SSAF` and `AF_General`, through helper `sub_2294` (`~(x ^ 0x9A) ^ (~prev + K)`). Algebraically this is the 85H50AI's chain, `b2 = AG[15:8] ^ 0x9A`, `b[i+1] = x ^ 0x65 ^ (K-1-b[i])`. For `AF_General` the output is byte-identical to the 85H50AI's. `General` and `Bestecher` send the values **in the clear**.
+- **Flags byte:** the 9th byte is sent by every OEM except `AF_General`. Bit 0 and bit 1 are two flags from `LibXmVideo_ImageInfo_get()`, not yet identified.
+- **No stray sync bytes:** any `A5` in bytes 1–6 goes out as `A4`, so the sync byte stays unique.
+- **Rate:** the live G6S UART0 sends ~108 B/s, which is 12 nine-byte frames per second. It doesn't use the 85H50AI's 50 ms cadence.
+
+**PTZ relay.**
+- Input: `xmaf_write_encrypt()` still takes the Pelco-D frames of the PTZ layer, and now also accepts a `C5` frame.
+- Output: `C5 01 c1 c2 d1 d2 ck 5C`, with the **address forced to `01`** and `ck` recomputed over bytes 1–5. For address 1 that is byte for byte the 85H50AI frame.
+- Repeat filter: a frame with `cmd1` 0 whose `cmd2` repeats the previous one is still dropped ("same ptz fliter"). Some `cmd2` values bypass it, and the set grew:
+  - 2021: `03 05 07 09 0B` (presets) `54 8D`.
+  - 2025: the same plus `4B 4C 4D 51 52 53 59 5B`.
+
+**Absolute commands (new).**
+- `xmaf_setComm(cmd, d1)` writes `C5 01 00 cmd d1 00 ck 00`, with `ck` = Σ bytes 1–5. The trailer is **`00`, not `5C`**: the template in `.rodata` is `c5 01 00 54 00 00 00 00`.
+- `xmaf_setMagnification(m)` is `cmd 54, d1 = m`, and `xmaf_triggerFocus()` is `cmd 56`. Both are untried on any board. The 85H50AI board ignores Pelco-D extended commands (see *Extended commands*), so don't expect it to act on these.
+- **The G6S also asks for the board's version.** The query is the `EF 02 0A 0C 00 00 00 00` frame in the table, and the answer is reply type `0A`. The G6S checks a checksum on that answer (Σ payload + len + 11) for every OEM except `AF_General`.
+- Since the query holds no `A5` or `C5`, a board that frames like the 85H50AI's skips it. `xm-uart` sends it on `v`.
+
+**Replies.** The `EF 01 type len payload` framing and the type numbers 00–09 are unchanged, plus `0A` (see *Replies*).
+
+**Live observation (G6S, stock firmware).** After 26 minutes up, `/proc/tty/driver/ttyAMA` showed uart0 `tx` growing at ~108 B/s and **`rx` 0**: the lens board had not sent a single byte, not even the boot-time zoom report the 85H50AI board sends. It isn't known yet whether this board never answers, or whether its TX isn't wired to the SoC.
+
+Reproduce:
+- Codec with a self-test that checks the chain against the 85H50AI's: `xmaf_proto.py` in the XM research notes for this device.
+- Decompiled functions: `xmaf_write_encrypt` 0x1b80, `XmAf_Send_afValue` 0x24c0, `sub_2294`, `xmaf_setComm` 0x3a88 and `XmAf_Receive_Task` 0x3170 in `libXmAf_Comm.so` (sha256 `52c9ae1f…`).
 
 ## Power-up behaviour
 

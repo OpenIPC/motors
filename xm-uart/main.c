@@ -129,6 +129,15 @@ static void send_move(int pan, int tilt, int zoom) {
 
 static void send_stop(void) { send_frame(0, 0, 0, 0); }
 
+/* MCU version query, as the GK7205V300 G6S firmware's libXmAf_Comm sends it
+ * for AFOEM General (PROTOCOL.md, "Newer revision"). It holds no A5 or C5, so
+ * a board that only frames on those skips it byte by byte. */
+static void send_version_query(void) {
+  static const uint8_t f[FRAME] = {0xef, 0x02, 0x0a, 0x0c, 0, 0, 0, 0};
+  if (!uart_send(f, false))
+    fprintf(stderr, "UART queue full, frame dropped\n");
+}
+
 /* Network relay (-l): frames from a TCP client go to the lens board, the
  * board's replies go back to the client. Used to replay a vendor camera's
  * traffic onto another camera's lens (see PROTOCOL.md). */
@@ -340,6 +349,17 @@ static void handle_reply(const uint8_t *r) {
     printf("%s mode\n", p[0] ? "NIGHT" : "DAY");
     return;
   }
+  /* Types the stock receivers know but no capture has shown yet (PROTOCOL.md,
+   * "Replies"): name them, keep the raw bytes. */
+  static const char *const names[] = {
+      [0x04] = "Pan position",     [0x05] = "Tilt position",
+      [0x06] = "Zoom position",    [0x08] = "AF controller version",
+      [0x09] = "PTZ version",      [0x0a] = "MCU version",
+  };
+  if (type < sizeof(names) / sizeof(names[0]) && names[type]) {
+    dump_hex(names[type], p, len);
+    return;
+  }
   dump_hex("Reply", r, 4 + (size_t)len);
 }
 
@@ -384,7 +404,8 @@ static void usage(const char *argv0) {
   printf("\t-a with -l: accept only this client address (anyone on the network\n"
          "\t   could otherwise drive the lens)\n\n");
   printf("Keys: + - zoom in/out, z x focus near/far, h l pan left/right,\n"
-         "      j k tilt down/up, Space or Enter stop, q quit\n");
+         "      j k tilt down/up, v query MCU version, Space or Enter stop,\n"
+         "      q quit\n");
 }
 
 static int open_uart(const char *device) {
@@ -546,6 +567,10 @@ int main(int argc, char *argv[]) {
       case ' ':
         puts("Stop");
         send_stop();
+        break;
+      case 'v':
+        puts("Query MCU version");
+        send_version_query();
         break;
       case 'q':
         quit = 1;

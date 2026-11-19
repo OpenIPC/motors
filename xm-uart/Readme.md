@@ -18,12 +18,13 @@ Disable the system getty on the UART first.
 | `z` / `x` | focus near / far (direction measured on video; opposite to Pelco-D bit names, see PROTOCOL.md) |
 | `h` / `l` (Colemak `i`) | pan left / right |
 | `j` / `k` (Colemak `n` / `e`) | tilt down / up |
+| `v` | ask the board for its MCU version (the newer firmware's `EF 02 0A 0C …` query; see PROTOCOL.md, *Newer revision*) |
 | Space, Enter | stop |
 | `q` | stop and quit |
 
 A move continues until stop. The tool also sends stop whenever it exits: on `q`, Ctrl-C, SIGTERM or SIGHUP, and when stdin closes.
 
-Zoom reports from the board are printed as `Zoom X1.4`.
+Zoom reports from the board are printed as `Zoom X1.4`; position and version replies by name.
 
 ### Network relay (`-l`)
 
