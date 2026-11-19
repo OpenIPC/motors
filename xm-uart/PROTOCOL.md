@@ -236,12 +236,18 @@ Everything above was measured on the 85H50AI. XM's newer firmware puts the same 
 | `SSAF` | 2 | 9 B, **obfuscated** | `FF 01 91 11 cx cy w h ck`, in % (9 B) | as General | as General |
 | `AF_General` | 3 | 8 B, **obfuscated** | `C5 01 C2 cx cy w h 5C`, in % | as General | `C5 01 00 8D 00 00 8E 5C` |
 
-The person box is the largest detection, in the detector's 8192×8192 space. `General` and `Bestecher` send it as the 85H50AI does: centre x and y as signed −127..127 (y up), width and height as 0–255. The other two OEMs send percentages of the frame.
+The person box is in the detector's 8192×8192 space. The 85H50AI sends the largest detection. The G6S code instead takes the minimum x/y over all detections and an extent that roughly bounds them: a box around the people, not one person.
+- `General` and `Bestecher`: the coordinates are encoded as on the 85H50AI (centre x and y as signed −127..127 with y up, width and height as 0–255), but the command byte is **`B5`**, where the 85H50AI uses `C5` (`C5 01 B5 …` against `C5 01 C5 …`).
+- The other two OEMs send percentages of the frame.
 
 **The AF stream.**
 - Layout: `A5 K AG[15:8] AG[7:0] FV[31:24] FV[23:16] FV[15:8] FV[7:0] [flags]`.
-- Byte 1 (`K`) is built as on the 85H50AI: `~(sec ^ 0x5A)`, the same as `(sec ^ 0x25) & 0x7F`, with bit 7 for night. `AG` is `LibXmVideo_Video_getAllGain()`; how it scales hasn't been checked against `u32AGain`.
-- **Obfuscation:** the chain applies only to `SSAF` and `AF_General`, through helper `sub_2294` (`~(x ^ 0x9A) ^ (~prev + K)`). Algebraically this is the 85H50AI's chain, `b2 = AG[15:8] ^ 0x9A`, `b[i+1] = x ^ 0x65 ^ (K-1-b[i])`. For `AF_General` the output is byte-identical to the 85H50AI's. `General` and `Bestecher` send the values **in the clear**.
+- Byte 1 (`K`) is built as on the 85H50AI, in two steps:
+  1. `~(sec ^ 0x5A)`;
+  2. bit 7 is then **replaced** by day/night: cleared by day (`& 0x7F`), set at night.
+
+  Bits 0–6 are therefore `(sec ^ 0x25) & 0x7F`, the 85H50AI's byte 1 for every `sec` and both modes (checked over all 256 × 2 inputs). `AG` is `LibXmVideo_Video_getAllGain()`; how it scales hasn't been checked against `u32AGain`.
+- **Obfuscation:** the chain applies only to `SSAF` and `AF_General`, through helper `sub_2294` (`~(x ^ 0x9A) ^ (~prev + K)`). Algebraically this is the 85H50AI's chain, `b2 = AG[15:8] ^ 0x9A`, `b[i+1] = x ^ 0x65 ^ (K-1-b[i])`. For `AF_General` the output is byte-identical to the 85H50AI's (`test_codec_g6s.py`, 20k random inputs). `General` and `Bestecher` send the values **in the clear**.
 - **Flags byte:** the 9th byte is sent by every OEM except `AF_General`. Bit 0 and bit 1 are two flags from `LibXmVideo_ImageInfo_get()`, not yet identified.
 - **No stray sync bytes:** any `A5` in bytes 1–6 goes out as `A4`, so the sync byte stays unique.
 - **Rate:** the live G6S UART0 sends ~108 B/s, which is 12 nine-byte frames per second. It doesn't use the 85H50AI's 50 ms cadence.
@@ -264,7 +270,7 @@ The person box is the largest detection, in the detector's 8192×8192 space. `Ge
 **Live observation (G6S, stock firmware).** After 26 minutes up, `/proc/tty/driver/ttyAMA` showed uart0 `tx` growing at ~108 B/s and **`rx` 0**: the lens board had not sent a single byte, not even the boot-time zoom report the 85H50AI board sends. It isn't known yet whether this board never answers, or whether its TX isn't wired to the SoC.
 
 Reproduce:
-- Codec with a self-test that checks the chain against the 85H50AI's: `xmaf_proto.py` in the XM research notes for this device.
+- [`uart-bridge/tests/test_codec_g6s.py`](../uart-bridge/tests/test_codec_g6s.py) transcribes the G6S `A5` encoder and checks it against `codec.a5_frame()`, which re-encodes every captured 85H50AI frame. `cd uart-bridge && uv run pytest tests/test_codec_g6s.py`
 - Decompiled functions: `xmaf_write_encrypt` 0x1b80, `XmAf_Send_afValue` 0x24c0, `sub_2294`, `xmaf_setComm` 0x3a88 and `XmAf_Receive_Task` 0x3170 in `libXmAf_Comm.so` (sha256 `52c9ae1f…`).
 
 ## Power-up behaviour
