@@ -10,7 +10,7 @@ CAMERA_BUILD := build-camera
 SIBLING_CAMERA_CC := ../../firmware/output/host/bin/arm-openipc-linux-musleabi-gcc
 CAMERA_CC ?= $(if $(wildcard $(SIBLING_CAMERA_CC)),$(SIBLING_CAMERA_CC),arm-openipc-linux-musleabi-gcc)
 PROGRAMS := $(BUILD)/motorsd $(BUILD)/motorsctl $(BUILD)/motors-cli \
-	$(BUILD)/mock_driver \
+	$(BUILD)/motors-onvif $(BUILD)/mock_driver \
 	$(BUILD)/pelcod_driver $(BUILD)/anjoy_driver \
 	$(BUILD)/libmotors.a $(BUILD)/test_libmotors \
 	$(BUILD)/test_libmotors_preemption
@@ -31,6 +31,10 @@ $(BUILD)/motorsctl: src/motorsctl.c | $(BUILD)
 $(BUILD)/motors-cli: src/motors_cli.c $(BUILD)/libmotors.a | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ src/motors_cli.c \
 		$(BUILD)/libmotors.a $(LDLIBS_JSON)
+
+$(BUILD)/motors-onvif: src/motors_onvif.c $(BUILD)/libmotors.a | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ src/motors_onvif.c \
+		$(BUILD)/libmotors.a $(LDLIBS_JSON) -lpthread -lm
 
 $(BUILD)/libmotors.o: src/libmotors.c include/libmotors.h | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ src/libmotors.c
