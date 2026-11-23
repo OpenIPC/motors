@@ -82,6 +82,15 @@ A timed movement includes `duration_ms`:
 The driver controls the duration. The service does not use a client timer to
 end a timed movement.
 
+Simultaneous diagonal pan and tilt movements use `"axis":"pantilt"` with
+direction `"upleft"`, `"upright"`, `"downleft"`, or `"downright"` (and optional
+`"speed"` and `"duration_ms"`). Clients must hold active leases on **both**
+`"pan"` and `"tilt"` before sending a `"pantilt"` move:
+
+```json
+{"version":1,"id":"move-pt","op":"move","axis":"pantilt","direction":"upright","duration_ms":400}
+```
+
 The `stop` operation ends one axis and any linked axes that the driver reports:
 
 ```json

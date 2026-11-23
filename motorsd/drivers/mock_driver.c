@@ -169,6 +169,21 @@ static int handle_request(int fd, FILE *trace, uint32_t *active,
         return send_reply(fd, id, true, "sent");
     }
 
+    if (!strcmp(operation, "move_pt")) {
+        const char *pan_dir = json_string(request, "pan_direction");
+        const char *tilt_dir = json_string(request, "tilt_direction");
+        unsigned duration = json_uint(request, "duration_ms", 0);
+        if (!pan_dir || !tilt_dir)
+            return send_reply(fd, id, false, "invalid pantilt move");
+        fprintf(trace, "MOVE_PT pan=%s tilt=%s duration_ms=%u\n",
+                pan_dir, tilt_dir, duration);
+        *active |= MOTORS_AXIS_BIT(MOTORS_AXIS_PAN) | MOTORS_AXIS_BIT(MOTORS_AXIS_TILT);
+        uint64_t dl = duration ? now_ms() + duration : 0;
+        deadlines[MOTORS_AXIS_PAN] = dl;
+        deadlines[MOTORS_AXIS_TILT] = dl;
+        return send_reply(fd, id, true, "sent");
+    }
+
     if (!strcmp(operation, "stop")) {
         unsigned axes = json_uint(request, "axes", 0);
         if (!axes) return send_reply(fd, id, false, "invalid stop");

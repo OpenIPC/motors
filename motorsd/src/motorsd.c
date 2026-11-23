@@ -535,17 +535,41 @@ static void handle_acquire(struct daemon_state *state, struct client *client,
 
 static void handle_move(struct daemon_state *state, struct client *client,
                         struct json_object *request, const char *id) {
-    enum motors_axis axis;
     const char *axis_text = json_string(request, "axis");
     const char *direction = json_string(request, "direction");
-    if (parse_axis(axis_text, &axis) != 0 || !direction || !*direction) {
+    if (!axis_text || !*axis_text || !direction || !*direction) {
         send_response(client, id, false, "invalid move request");
         return;
     }
-    uint32_t bit = MOTORS_AXIS_BIT(axis);
-    if (!(client->leases & bit)) {
-        send_response(client, id, false, "lease required");
-        return;
+    bool is_pantilt = !strcmp(axis_text, "pantilt");
+    enum motors_axis axis = MOTORS_AXIS_PAN;
+    const char *pan_dir = NULL;
+    const char *tilt_dir = NULL;
+    uint32_t bit = 0;
+    if (is_pantilt) {
+        if (!strcmp(direction, "upleft")) { tilt_dir = "up"; pan_dir = "left"; }
+        else if (!strcmp(direction, "upright")) { tilt_dir = "up"; pan_dir = "right"; }
+        else if (!strcmp(direction, "downleft")) { tilt_dir = "down"; pan_dir = "left"; }
+        else if (!strcmp(direction, "downright")) { tilt_dir = "down"; pan_dir = "right"; }
+        else {
+            send_response(client, id, false, "invalid pantilt direction");
+            return;
+        }
+        bit = MOTORS_AXIS_BIT(MOTORS_AXIS_PAN) | MOTORS_AXIS_BIT(MOTORS_AXIS_TILT);
+        if ((client->leases & bit) != bit) {
+            send_response(client, id, false, "lease required");
+            return;
+        }
+    } else {
+        if (parse_axis(axis_text, &axis) != 0) {
+            send_response(client, id, false, "invalid move request");
+            return;
+        }
+        bit = MOTORS_AXIS_BIT(axis);
+        if (!(client->leases & bit)) {
+            send_response(client, id, false, "lease required");
+            return;
+        }
     }
     unsigned duration_ms = 0;
     struct json_object *duration = NULL;
@@ -562,9 +586,14 @@ static void handle_move(struct daemon_state *state, struct client *client,
         return;
     }
     char error[160] = "";
-    struct json_object *driver_message = new_driver_request("move");
-    json_object_object_add(driver_message, "axis", json_object_new_int(axis));
-    json_object_object_add(driver_message, "direction", json_object_new_string(direction));
+    struct json_object *driver_message = new_driver_request(is_pantilt ? "move_pt" : "move");
+    if (is_pantilt) {
+        json_object_object_add(driver_message, "pan_direction", json_object_new_string(pan_dir));
+        json_object_object_add(driver_message, "tilt_direction", json_object_new_string(tilt_dir));
+    } else {
+        json_object_object_add(driver_message, "axis", json_object_new_int(axis));
+        json_object_object_add(driver_message, "direction", json_object_new_string(direction));
+    }
     if (speed > 0)
         json_object_object_add(driver_message, "speed", json_object_new_int64(speed));
     json_object_object_add(driver_message, "duration_ms", json_object_new_int64(duration_ms));

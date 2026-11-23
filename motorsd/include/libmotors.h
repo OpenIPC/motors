@@ -67,6 +67,11 @@ int motors_move(struct motors_client *client, enum motors_client_axis axis,
 int motors_move_speed(struct motors_client *client, enum motors_client_axis axis,
                       enum motors_direction direction, unsigned speed,
                       unsigned duration_ms, char *error, size_t error_size);
+int motors_move_pantilt(struct motors_client *client,
+                        enum motors_direction pan_direction,
+                        enum motors_direction tilt_direction,
+                        unsigned speed, unsigned duration_ms,
+                        char *error, size_t error_size);
 int motors_stop(struct motors_client *client, enum motors_client_axis axis,
                 char *error, size_t error_size);
 int motors_stop_all(struct motors_client *client,

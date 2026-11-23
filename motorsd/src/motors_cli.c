@@ -7,7 +7,7 @@
 static void usage(const char *name) {
     fprintf(stderr,
         "Usage: %s [--socket PATH] [--speed N] [--role automation|af|manual] <action> [arg]\n"
-        "Actions: up, down, left, right, tele, wide, near, far, open, close, stop, preset <num>, ircut <day|night>\n",
+        "Actions: up, down, left, right, upleft, upright, downleft, downright, tele, wide, near, far, open, close, stop, preset <num>, ircut <day|night>\n",
         name);
 }
 
@@ -65,6 +65,21 @@ int main(int argc, char **argv) {
     } else if (!strcmp(action, "ircut")) {
         const char *ircut_val = arg_val ? arg_val : "day";
         rc = motors_command(client, "ircut", ircut_val, error, sizeof(error));
+    } else if (!strcmp(action, "upleft") || !strcmp(action, "upright") ||
+               !strcmp(action, "downleft") || !strcmp(action, "downright")) {
+        enum motors_direction pdir = strstr(action, "left") ? MOTORS_LEFT : MOTORS_RIGHT;
+        enum motors_direction tdir = !strncmp(action, "up", 2) ? MOTORS_UP : MOTORS_DOWN;
+        if (!duration_ms) duration_ms = 1000;
+        unsigned lease_ms = duration_ms + 1000;
+        rc = motors_subscribe(client, error, sizeof(error));
+        if (rc == 0) rc = motors_acquire(client, role, MOTORS_PAN, lease_ms, error, sizeof(error));
+        if (rc == 0) rc = motors_acquire(client, role, MOTORS_TILT, lease_ms, error, sizeof(error));
+        if (rc == 0) {
+            rc = motors_move_pantilt(client, pdir, tdir, speed, duration_ms, error, sizeof(error));
+            if (rc == 0 && duration_ms > 0) {
+                rc = motors_wait_movement(client, MOTORS_PAN, (int)duration_ms + 1000, NULL, error, sizeof(error));
+            }
+        }
     } else {
         enum motors_client_axis axis;
         enum motors_direction dir;
