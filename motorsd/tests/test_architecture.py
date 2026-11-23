@@ -586,9 +586,55 @@ def test_failed_driver_recovery():
         assert "driver recovery failed after 3 attempts" in daemon.stderr.read()
 
 
+def test_pantilt_diagonal():
+    with tempfile.TemporaryDirectory(prefix="motorsd-pt-") as directory:
+        temp = pathlib.Path(directory)
+        socket_path = temp / "motorsd.sock"
+        trace_path = temp / "driver.trace"
+        config_path = temp / "mock.conf"
+        config_path.write_text(f"trace={trace_path}\n", encoding="utf-8")
+        daemon = subprocess.Popen(
+            [str(DAEMON), "--socket", str(socket_path), "--driver", str(DRIVER),
+             "--driver-config", str(config_path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        client = None
+        try:
+            wait_for_daemon(daemon, socket_path)
+            client = Client(socket_path)
+            expect(client.request({"version": 1, "id": "sub", "op": "subscribe"}),
+                   state="subscribed")
+            expect(client.request({"version": 1, "id": "acq-pan", "op": "acquire",
+                                   "role": "automation", "axis": "pan",
+                                   "lease_ms": 2000}),
+                   state="acquired")
+            expect(client.request({"version": 1, "id": "pt-half", "op": "move",
+                                   "axis": "pantilt", "direction": "upright",
+                                   "duration_ms": 120}),
+                   ok=False, error="lease required")
+            expect(client.request({"version": 1, "id": "acq-tilt", "op": "acquire",
+                                   "role": "automation", "axis": "tilt",
+                                   "lease_ms": 2000}),
+                   state="acquired")
+            expect(client.request({"version": 1, "id": "pt-ok", "op": "move",
+                                   "axis": "pantilt", "direction": "upright",
+                                   "duration_ms": 120}),
+                   state="start_sent")
+            assert any("MOVE_PT pan=right tilt=up duration_ms=120" in line
+                       for line in read_lines(trace_path)), read_lines(trace_path)
+        finally:
+            if client is not None:
+                client.close()
+            daemon.terminate()
+            daemon.wait(timeout=2)
+
+
 if __name__ == "__main__":
     run_test()
     test_pelcod_driver()
     test_xiongmai_driver_telemetry()
     test_failed_driver_recovery()
+    test_pantilt_diagonal()
     print("PASS: driver IPC, leases, preemption, telemetry, recovery, and raw access")

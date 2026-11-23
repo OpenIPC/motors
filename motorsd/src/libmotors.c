@@ -340,6 +340,36 @@ int motors_move(struct motors_client *client, enum motors_client_axis axis,
                              error, error_size);
 }
 
+int motors_move_pantilt(struct motors_client *client,
+                        enum motors_direction pan_direction,
+                        enum motors_direction tilt_direction,
+                        unsigned speed, unsigned duration_ms,
+                        char *error, size_t error_size) {
+    if (!client ||
+        (pan_direction != MOTORS_LEFT && pan_direction != MOTORS_RIGHT) ||
+        (tilt_direction != MOTORS_UP && tilt_direction != MOTORS_DOWN) ||
+        speed > 255) {
+        set_error(error, error_size, "invalid pantilt move arguments");
+        return -1;
+    }
+    char dir_name[16];
+    snprintf(dir_name, sizeof(dir_name), "%s%s",
+             tilt_direction == MOTORS_UP ? "up" : "down",
+             pan_direction == MOTORS_LEFT ? "left" : "right");
+    struct json_object *request = new_request(client, "move");
+    json_object_object_add(request, "axis", json_object_new_string("pantilt"));
+    json_object_object_add(request, "direction", json_object_new_string(dir_name));
+    if (speed > 0)
+        json_object_object_add(request, "speed", json_object_new_int64(speed));
+    json_object_object_add(request, "duration_ms", json_object_new_int64(duration_ms));
+    int result = send_object(client, request, error, error_size);
+    if (result == 0 && duration_ms) {
+        client->completed_axes &= ~(MOTORS_AXIS_MASK(MOTORS_PAN) |
+                                    MOTORS_AXIS_MASK(MOTORS_TILT));
+    }
+    return result;
+}
+
 int motors_stop(struct motors_client *client, enum motors_client_axis axis,
                 char *error, size_t error_size) {
     if (!client || axis > MOTORS_IRIS) {
