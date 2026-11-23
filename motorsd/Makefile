@@ -62,6 +62,7 @@ $(BUILD)/anjoy_driver: drivers/anjoy_driver.c include/motors_driver.h | $(BUILD)
 
 test: all
 	python3 tests/test_architecture.py
+	python3 tests/test_onvif.py
 
 camera:
 	$(MAKE) BUILD=$(CAMERA_BUILD) CC=$(CAMERA_CC) JSON_CFLAGS= all

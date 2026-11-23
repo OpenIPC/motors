@@ -723,6 +723,7 @@ static bool drive_pan_tilt_tracked(struct motors_client *cl,
                  c2, d1, d2, csum);
 
         int rc = motors_acquire(cl, MOTORS_MANUAL, MOTORS_PAN, chunk + 1000U, err, sizeof(err));
+        if (rc == 0) rc = motors_acquire(cl, MOTORS_MANUAL, MOTORS_TILT, chunk + 1000U, err, sizeof(err));
         if (rc == 0) rc = motors_request(cl, req, resp, sizeof(resp), err, sizeof(err));
         if (rc != 0) {
             diag_ok = false;
@@ -1242,7 +1243,26 @@ static bool check_auth(const char *headers, const char *body) {
 
     char expected_b64[64];
     b64_encode(digest, sizeof(digest), expected_b64, sizeof(expected_b64));
-    return strcmp(ws_pass, expected_b64) == 0;
+    if (strcmp(ws_pass, expected_b64) != 0) return false;
+
+    /* Reject replayed WSSE nonces using a small bounded ring buffer */
+    static pthread_mutex_t nonce_mu = PTHREAD_MUTEX_INITIALIZER;
+    static char seen_nonces[32][128];
+    static size_t seen_pos = 0;
+    bool replayed = false;
+    pthread_mutex_lock(&nonce_mu);
+    for (size_t i = 0; i < 32; i++) {
+        if (seen_nonces[i][0] && strcmp(seen_nonces[i], ws_nonce) == 0) {
+            replayed = true;
+            break;
+        }
+    }
+    if (!replayed) {
+        snprintf(seen_nonces[seen_pos], sizeof(seen_nonces[seen_pos]), "%.127s", ws_nonce);
+        seen_pos = (seen_pos + 1) % 32;
+    }
+    pthread_mutex_unlock(&nonce_mu);
+    return !replayed;
 }
 
 /* ---------------- SOAP Response Builders ---------------- */
@@ -1758,6 +1778,9 @@ static int handle_soap_request(const char *headers, const char *body,
         char name[64] = "", tok[64] = "";
         xml_get_text(body, "PresetName", name, sizeof(name));
         xml_get_text(body, "PresetToken", tok, sizeof(tok));
+        for (char *p = name; *p; p++) {
+            if (*p == '|' || *p == '\t' || *p == '\r' || *p == '\n') *p = ' ';
+        }
 
         struct preset_entry list[MAX_PRESETS];
         size_t n = load_presets(list, MAX_PRESETS);
@@ -1774,39 +1797,47 @@ static int handle_soap_request(const char *headers, const char *body,
             }
         }
         if (idx < 0) {
-            int next_id = 1;
+            int next_id = 0;
             for (int cand = 1; cand <= MAX_PRESETS; cand++) {
                 bool used = false;
                 for (size_t i = 0; i < n; i++) if (list[i].id == cand) used = true;
                 if (!used) { next_id = cand; break; }
             }
-            if (n < MAX_PRESETS) {
+            if (n < MAX_PRESETS && (want_id > 0 && want_id <= MAX_PRESETS ? want_id : next_id) > 0) {
                 idx = (int)n++;
                 memset(&list[idx], 0, sizeof(list[idx]));
-                list[idx].id = want_id > 0 && want_id <= MAX_PRESETS ? want_id : next_id;
+                list[idx].id = (want_id > 0 && want_id <= MAX_PRESETS) ? want_id : next_id;
                 list[idx].zoom_restore = 1;
             }
         }
-        int saved_id = 1;
-        if (idx >= 0) {
-            long pan = 0, tilt = 0, focus = 0;
-            ptz_pos_read(&pan, &tilt, &focus);
-            double mag = current_mag_or_cached();
-            if (name[0]) snprintf(list[idx].name, sizeof(list[idx].name), "%.63s", name);
-            else if (!list[idx].name[0]) snprintf(list[idx].name, sizeof(list[idx].name), "Preset %d", list[idx].id);
-            list[idx].pan_ms = pan;
-            list[idx].tilt_ms = tilt;
-            list[idx].focus_ms = focus;
-            list[idx].has_focus = true;
-            list[idx].mag = mag;
-            list[idx].has_mag = true;
-            save_presets(list, n);
-            saved_id = list[idx].id;
+        if (idx < 0) {
+            soap_wrap(resp_xml, resp_size, soap11,
+                "<s:Fault><s:Code><s:Value>s:Sender</s:Value></s:Code>"
+                "<s:Reason><s:Text xml:lang=\"en\">Maximum number of presets reached</s:Text></s:Reason></s:Fault>");
+            return 400;
+        }
+
+        long pan = 0, tilt = 0, focus = 0;
+        ptz_pos_read(&pan, &tilt, &focus);
+        double mag = current_mag_or_cached();
+        if (name[0]) snprintf(list[idx].name, sizeof(list[idx].name), "%.63s", name);
+        else if (!list[idx].name[0]) snprintf(list[idx].name, sizeof(list[idx].name), "Preset %d", list[idx].id);
+        list[idx].pan_ms = pan;
+        list[idx].tilt_ms = tilt;
+        list[idx].focus_ms = focus;
+        list[idx].has_focus = true;
+        list[idx].mag = mag;
+        list[idx].has_mag = true;
+        if (!save_presets(list, n)) {
+            soap_wrap(resp_xml, resp_size, soap11,
+                "<s:Fault><s:Code><s:Value>s:Receiver</s:Value></s:Code>"
+                "<s:Reason><s:Text xml:lang=\"en\">Failed to persist presets</s:Text></s:Reason></s:Fault>");
+            return 500;
         }
         char b[256];
         snprintf(b, sizeof(b),
             "<tptz:SetPresetResponse><tptz:PresetToken>%d</tptz:PresetToken></tptz:SetPresetResponse>",
-            saved_id);
+            list[idx].id);
         soap_wrap(resp_xml, resp_size, soap11, b);
         return 200;
     }
@@ -1822,12 +1853,49 @@ static int handle_soap_request(const char *headers, const char *body,
             if (want_id > 0 && list[i].id == want_id) continue;
             list[out_n++] = list[i];
         }
-        save_presets(list, out_n);
+        if (!save_presets(list, out_n)) {
+            soap_wrap(resp_xml, resp_size, soap11,
+                "<s:Fault><s:Code><s:Value>s:Receiver</s:Value></s:Code>"
+                "<s:Reason><s:Text xml:lang=\"en\">Failed to persist presets</s:Text></s:Reason></s:Fault>");
+            return 500;
+        }
         soap_wrap(resp_xml, resp_size, soap11, "<tptz:RemovePresetResponse/>");
         return 200;
     }
 
     if (xml_find_tag_open(body, "SetHomePosition")) {
+        int home_id = read_boot_home_id();
+        struct preset_entry list[MAX_PRESETS];
+        size_t n = load_presets(list, MAX_PRESETS);
+        int idx = -1;
+        for (size_t i = 0; i < n; i++) {
+            if (list[i].id == home_id) { idx = (int)i; break; }
+        }
+        if (idx < 0 && n < MAX_PRESETS) {
+            idx = (int)n++;
+            memset(&list[idx], 0, sizeof(list[idx]));
+            list[idx].id = home_id;
+            snprintf(list[idx].name, sizeof(list[idx].name), "Home");
+            list[idx].zoom_restore = 1;
+        }
+        if (idx >= 0) {
+            long pan = 0, tilt = 0, focus = 0;
+            ptz_pos_read(&pan, &tilt, &focus);
+            list[idx].pan_ms = pan;
+            list[idx].tilt_ms = tilt;
+            list[idx].focus_ms = focus;
+            list[idx].has_focus = true;
+            list[idx].mag = current_mag_or_cached();
+            list[idx].has_mag = true;
+            if (!save_presets(list, n)) {
+                soap_wrap(resp_xml, resp_size, soap11,
+                    "<s:Fault><s:Code><s:Value>s:Receiver</s:Value></s:Code>"
+                    "<s:Reason><s:Text xml:lang=\"en\">Failed to persist home position</s:Text></s:Reason></s:Fault>");
+                return 500;
+            }
+            FILE *hf = fopen(BOOT_HOME_FILE, "w");
+            if (hf) { fprintf(hf, "%d\n", list[idx].id); fclose(hf); }
+        }
         soap_wrap(resp_xml, resp_size, soap11, "<tptz:SetHomePositionResponse/>");
         return 200;
     }
