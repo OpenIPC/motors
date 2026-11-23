@@ -118,6 +118,17 @@ The direction depends on the axis:
 | zoom | `tele`, `wide` |
 | focus | `near`, `far` |
 
+Simultaneous diagonal pan and tilt moves arrive as `op:"move_pt"`:
+
+```json
+{"version":1,"id":"driver-pt","op":"move_pt","pan_direction":"right","tilt_direction":"up","duration_ms":400}
+```
+
+Optional `"speed"` (`1`..`255`) overrides the driver's configured pan/tilt
+speeds. Drivers that do not support simultaneous diagonal movement reply with
+`{"version":1,"id":"...","ok":false,"error":"unsupported request"}` (or a
+non-ok reply) without changing motor state.
+
 ## End movement
 
 `motorsd` sends an axis mask:

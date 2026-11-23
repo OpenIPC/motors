@@ -104,22 +104,7 @@ int main(int argc, char **argv) {
             axis = MOTORS_IRIS; dir = MOTORS_OPEN;
         } else if (!strcmp(action, "close") || !strcmp(action, "irisclose")) {
             axis = MOTORS_IRIS; dir = MOTORS_CLOSE;
-        } else if (!strcmp(action, "upleft") || !strcmp(action, "upright") ||
-               !strcmp(action, "downleft") || !strcmp(action, "downright")) {
-        enum motors_direction pdir = strstr(action, "left") ? MOTORS_LEFT : MOTORS_RIGHT;
-        enum motors_direction tdir = !strncmp(action, "up", 2) ? MOTORS_UP : MOTORS_DOWN;
-        if (!duration_ms) duration_ms = 1000;
-        unsigned lease_ms = duration_ms + 1000;
-        rc = motors_subscribe(client, error, sizeof(error));
-        if (rc == 0) rc = motors_acquire(client, role, MOTORS_PAN, lease_ms, error, sizeof(error));
-        if (rc == 0) rc = motors_acquire(client, role, MOTORS_TILT, lease_ms, error, sizeof(error));
-        if (rc == 0) {
-            rc = motors_move_pantilt(client, pdir, tdir, speed, duration_ms, error, sizeof(error));
-            if (rc == 0 && duration_ms > 0) {
-                rc = motors_wait_movement(client, MOTORS_PAN, (int)duration_ms + 1000, NULL, error, sizeof(error));
-            }
-        }
-    } else {
+        } else {
             fprintf(stderr, "unknown action: %s\n", action);
             motors_close(client);
             return 2;
