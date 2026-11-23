@@ -714,17 +714,13 @@ static bool drive_pan_tilt_tracked(struct motors_client *cl,
         ptz_pos_read(&pan, &tilt, &focus);
         touch_af_cancel();
 
-        uint8_t c2 = (uint8_t)((dp > 0 ? 0x02 : 0x04) | (dt > 0 ? 0x08 : 0x10));
-        uint8_t d1 = 0x14, d2 = 0x14; /* matches anjoy.conf pan_speed=20, tilt_speed=20 */
-        uint8_t csum = (uint8_t)((0x01 + c2 + d1 + d2) & 0xff);
-        char req[160], resp[256] = "", err[128] = "";
-        snprintf(req, sizeof(req),
-                 "{\"version\":1,\"id\":\"diag\",\"op\":\"raw\",\"payload\":{\"bytes\":\"ff0100%02x%02x%02x%02x\"}}",
-                 c2, d1, d2, csum);
+        enum motors_direction pdir = (dp > 0) ? MOTORS_RIGHT : MOTORS_LEFT;
+        enum motors_direction tdir = (dt > 0) ? MOTORS_UP : MOTORS_DOWN;
+        char err[128] = "";
 
         int rc = motors_acquire(cl, MOTORS_MANUAL, MOTORS_PAN, chunk + 1000U, err, sizeof(err));
         if (rc == 0) rc = motors_acquire(cl, MOTORS_MANUAL, MOTORS_TILT, chunk + 1000U, err, sizeof(err));
-        if (rc == 0) rc = motors_request(cl, req, resp, sizeof(resp), err, sizeof(err));
+        if (rc == 0) rc = motors_move_pantilt(cl, pdir, tdir, 0U, chunk, err, sizeof(err));
         if (rc != 0) {
             diag_ok = false;
             break;
