@@ -314,6 +314,25 @@ static int send_stop(struct driver_state *state) {
     return 0;
 }
 
+// A P035 UART descriptor can fail while the controller remains healthy.
+// Reopen it once so the next logical command does not require a daemon or
+// driver restart. Repeating a continuous movement frame is idempotent, so
+// every movement frame -- single-axis or diagonal -- goes out through here.
+static int send_movement_frame(struct driver_state *state, uint8_t command1,
+                               uint8_t command2, uint8_t data1, uint8_t data2) {
+    uint8_t frame[8];
+    size_t frame_length = make_frame(&state->config, command1, command2,
+                                     data1, data2, frame);
+    if (write_all(state->uart_fd, frame, frame_length) == 0) return 0;
+
+    int saved_error = errno;
+    if (reopen_uart(state) == 0 &&
+        write_all(state->uart_fd, frame, frame_length) == 0)
+        return 0;
+    if (errno == 0) errno = saved_error;
+    return -1;
+}
+
 static int send_move(struct driver_state *state, unsigned axis,
                      const char *direction, unsigned speed) {
     uint8_t command1 = 0, command2 = 0, data1 = 0, data2 = 0;
@@ -349,20 +368,7 @@ static int send_move(struct driver_state *state, unsigned axis,
     default:
         return -1;
     }
-    uint8_t frame[8];
-    size_t frame_length = make_frame(&state->config, command1, command2,
-                                     data1, data2, frame);
-    if (write_all(state->uart_fd, frame, frame_length) == 0) return 0;
-
-    // A P035 UART descriptor can fail while the controller remains healthy.
-    // Reopen it once so the next logical command does not require a daemon or
-    // driver restart. Repeating a continuous movement frame is idempotent.
-    int saved_error = errno;
-    if (reopen_uart(state) == 0 &&
-        write_all(state->uart_fd, frame, frame_length) == 0)
-        return 0;
-    if (errno == 0) errno = saved_error;
-    return -1;
+    return send_movement_frame(state, command1, command2, data1, data2);
 }
 
 static bool valid_direction(unsigned axis, const char *direction) {
@@ -842,9 +848,7 @@ static int handle_request(struct driver_state *state, struct json_object *reques
                                (!strcmp(tilt_dir, "up") ? 0x08 : 0x10));
         uint8_t d1 = (uint8_t)(speed ? speed : state->config.pan_speed);
         uint8_t d2 = (uint8_t)(speed ? speed : state->config.tilt_speed);
-        uint8_t frame[8];
-        size_t frame_length = make_frame(&state->config, 0x00, c2, d1, d2, frame);
-        if (write_all(state->uart_fd, frame, frame_length) != 0) {
+        if (send_movement_frame(state, 0x00, c2, d1, d2) != 0) {
             char error[160];
             snprintf(error, sizeof(error), "transport write failed: %s",
                      strerror(errno));

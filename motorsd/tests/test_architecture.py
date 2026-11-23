@@ -431,6 +431,15 @@ def test_pelcod_driver():
             assert event["event"] == "movement_ended", event
             assert event["axes"] == 15, event
 
+            parent.send(json.dumps({"version": 1, "id": "move-pt", "op": "move_pt",
+                                    "pan_direction": "right", "tilt_direction": "up",
+                                    "duration_ms": 20}).encode())
+            expect(json.loads(parent.recv(4096)), state="sent")
+            assert read_exact(7) == bytes.fromhex("ff01000a20204b")
+            assert read_exact(21) == bytes.fromhex("ff010000000001") * 3
+            event = json.loads(parent.recv(4096))
+            assert event["event"] == "movement_ended", event
+
             parent.send(json.dumps({"version": 1, "id": "raw", "op": "raw",
                                     "payload": {"bytes": "ff010007007a82"}}).encode())
             expect(json.loads(parent.recv(4096)), state="sent")
