@@ -488,6 +488,46 @@ static int handle_request(struct driver_state *state, struct json_object *reques
         return send_reply(state->control_fd, id, true, "sent");
     }
 
+    if (!strcmp(operation, "move_pt")) {
+        const char *pan_dir = json_string(request, "pan_direction");
+        const char *tilt_dir = json_string(request, "tilt_direction");
+        unsigned speed = json_uint(request, "speed", 0);
+        unsigned duration = json_uint(request, "duration_ms", 0);
+        if (!valid_direction(MOTORS_AXIS_PAN, pan_dir) ||
+            !valid_direction(MOTORS_AXIS_TILT, tilt_dir) || speed > 255)
+            return send_reply(state->control_fd, id, false, "invalid pantilt movement");
+        uint8_t c2 = (uint8_t)((!strcmp(pan_dir, "left") ? 0x04 : 0x02) |
+                               (!strcmp(tilt_dir, "up") ? 0x08 : 0x10));
+        uint8_t d1 = (uint8_t)(speed ? speed : state->config.pan_speed);
+        uint8_t d2 = (uint8_t)(speed ? speed : state->config.tilt_speed);
+        state->cancel_mcu_af_at_ms = 0;
+        state->cancel_mcu_af_stop_ms = 0;
+        state->cancel_mcu_af_passes = 0;
+        if (send_cmd_frame(state, 0x00, c2, d1, d2) != 0) {
+            char error[160];
+            snprintf(error, sizeof(error), "transport write failed: %s",
+                     strerror(errno));
+            (void)send_reply(state->control_fd, id, false, error);
+            return -1;
+        }
+        uint32_t pt_mask = MOTORS_AXIS_BIT(MOTORS_AXIS_PAN) | MOTORS_AXIS_BIT(MOTORS_AXIS_TILT);
+        uint32_t interrupted = 0;
+        for (unsigned a = 0; a < MOTORS_AXIS_COUNT; ++a) {
+            if (state->deadlines[a] && (!(pt_mask & MOTORS_AXIS_BIT(a)) || !duration))
+                interrupted |= MOTORS_AXIS_BIT(a);
+        }
+        state->active = ANJOY_ALL_AXES;
+        memset(state->deadlines, 0, sizeof(state->deadlines));
+        if (duration) {
+            uint64_t dl = now_ms() + duration;
+            state->deadlines[MOTORS_AXIS_PAN] = dl;
+            state->deadlines[MOTORS_AXIS_TILT] = dl;
+        }
+        if (interrupted && send_movement_event(state->control_fd, interrupted) != 0)
+            return -1;
+        return send_reply(state->control_fd, id, true, "sent");
+    }
+
     if (!strcmp(operation, "stop")) {
         unsigned axes = json_uint(request, "axes", 0);
         if (!(axes & ANJOY_ALL_AXES))
